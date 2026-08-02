@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: listen-together-server
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      - key: METERED_API_KEY
+        sync: false
+      - key: METERED_DOMAIN
+        sync: false
