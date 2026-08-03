@@ -84,6 +84,47 @@ function reduceReceiverLatency(receiver: RTCRtpReceiver) {
   }
 }
 
+/**
+ * Wires up console diagnostics for a peer connection so connection failures
+ * (usually NAT/firewall traversal on stricter networks) leave a clear trail.
+ * `label` identifies which peer/direction this is in a multi-peer mesh.
+ */
+function logConnectionDiagnostics(pc: RTCPeerConnection, label: string, onStateChange?: () => void) {
+  pc.oniceconnectionstatechange = () => {
+    console.log(`[webrtc:${label}] ICE connection state -> ${pc.iceConnectionState}`);
+  };
+  pc.onicegatheringstatechange = () => {
+    console.log(`[webrtc:${label}] ICE gathering state -> ${pc.iceGatheringState}`);
+  };
+  pc.onicecandidateerror = (event) => {
+    const e = event as RTCPeerConnectionIceErrorEvent;
+    // errorCode 701 = STUN/TURN server unreachable, 401/403 = bad TURN credentials.
+    console.warn(`[webrtc:${label}] ICE candidate error ${e.errorCode} on ${e.url}: ${e.errorText}`);
+  };
+  pc.onconnectionstatechange = () => {
+    console.log(`[webrtc:${label}] connection state -> ${pc.connectionState}`);
+    if (pc.connectionState === "connected") logSelectedCandidatePair(pc, label);
+    onStateChange?.();
+  };
+}
+
+/** Logs which ICE candidate pair (host/srflx/relay on each side) actually got used. */
+async function logSelectedCandidatePair(pc: RTCPeerConnection, label: string) {
+  try {
+    const stats = await pc.getStats();
+    stats.forEach((report) => {
+      if (report.type !== "candidate-pair" || report.state !== "succeeded") return;
+      const local = stats.get(report.localCandidateId) as { candidateType?: string } | undefined;
+      const remote = stats.get(report.remoteCandidateId) as { candidateType?: string } | undefined;
+      console.log(
+        `[webrtc:${label}] using ${local?.candidateType ?? "?"} -> ${remote?.candidateType ?? "?"} candidate pair`
+      );
+    });
+  } catch {
+    // getStats() shouldn't normally throw, but this is purely diagnostic - ignore failures.
+  }
+}
+
 interface UseAudioMeshOptions {
   isHost: boolean;
   participants: Participant[];
@@ -124,6 +165,7 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
 
       const pc = new RTCPeerConnection({ iceServers: await getIceServers() });
       peersRef.current.set(listenerId, pc);
+      logConnectionDiagnostics(pc, `host->${listenerId.slice(0, 6)}`);
 
       localStream.getAudioTracks().forEach((track) => pc.addTrack(track, localStream));
 
@@ -220,6 +262,11 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
       closePeer(from);
       const pc = new RTCPeerConnection({ iceServers: await getIceServers() });
       peersRef.current.set(from, pc);
+      logConnectionDiagnostics(pc, `listener<-${from.slice(0, 6)}`, () => {
+        if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+          setRemoteStream((prev) => (peersRef.current.get(from) === pc ? null : prev));
+        }
+      });
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
@@ -229,11 +276,6 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
       pc.ontrack = (event) => {
         reduceReceiverLatency(event.receiver);
         setRemoteStream(event.streams[0] ?? null);
-      };
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
-          setRemoteStream((prev) => (peersRef.current.get(from) === pc ? null : prev));
-        }
       };
 
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
