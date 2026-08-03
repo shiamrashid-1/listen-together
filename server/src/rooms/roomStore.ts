@@ -7,6 +7,7 @@ interface Room {
   queue: QueueTrack[];
   nowPlayingId: string | null;
   isSharing: boolean;
+  spotifyConnected: boolean;
   createdAt: number;
 }
 
@@ -34,6 +35,7 @@ function toRoomState(room: Room): RoomState {
     queue: room.queue,
     nowPlayingId: room.nowPlayingId,
     isSharing: room.isSharing,
+    spotifyConnected: room.spotifyConnected,
   };
 }
 
@@ -46,6 +48,7 @@ export function createRoom(hostId: string, hostName: string): RoomState {
     queue: [],
     nowPlayingId: null,
     isSharing: false,
+    spotifyConnected: false,
     createdAt: Date.now(),
   };
   rooms.set(code, room);
@@ -76,7 +79,9 @@ export function findRoomByParticipant(participantId: string): Room | null {
  * remaining participant to host. Deletes the room once empty.
  * Returns the updated room state, or null if the room no longer exists.
  */
-export function removeParticipant(participantId: string): { room: RoomState; deleted: boolean } | null {
+export function removeParticipant(
+  participantId: string
+): { room: RoomState; deleted: boolean; hostChanged: boolean } | null {
   const room = findRoomByParticipant(participantId);
   if (!room) return null;
 
@@ -84,17 +89,19 @@ export function removeParticipant(participantId: string): { room: RoomState; del
 
   if (room.participants.size === 0) {
     rooms.delete(room.code);
-    return { room: toRoomState(room), deleted: true };
+    return { room: toRoomState(room), deleted: true, hostChanged: false };
   }
 
+  let hostChanged = false;
   if (room.hostId === participantId) {
     const [nextHostId, nextHost] = room.participants.entries().next().value as [string, Participant];
     room.hostId = nextHostId;
     room.participants.set(nextHostId, { ...nextHost, isHost: true });
     room.isSharing = false; // previous host's audio share is gone
+    hostChanged = true;
   }
 
-  return { room: toRoomState(room), deleted: false };
+  return { room: toRoomState(room), deleted: false, hostChanged };
 }
 
 export function setSharing(code: string, isSharing: boolean): RoomState | null {
@@ -102,6 +109,18 @@ export function setSharing(code: string, isSharing: boolean): RoomState | null {
   if (!room) return null;
   room.isSharing = isSharing;
   return toRoomState(room);
+}
+
+export function setSpotifyConnected(code: string, connected: boolean): RoomState | null {
+  const room = rooms.get(code.toUpperCase());
+  if (!room) return null;
+  room.spotifyConnected = connected;
+  return toRoomState(room);
+}
+
+export function isHost(code: string, participantId: string): boolean {
+  const room = rooms.get(code.toUpperCase());
+  return room?.hostId === participantId;
 }
 
 export function addQueueTrack(code: string, track: Omit<QueueTrack, "id">): RoomState | null {

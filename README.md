@@ -5,7 +5,7 @@ A very basic web app for listening to Spotify with friends in real time:
 - Create a room and get a short shareable code.
 - Friends join from their browser using that code.
 - The host shares their Spotify tab's audio (via `getDisplayMedia`) and it's relayed live to everyone else in the room over WebRTC — audio only, no video, no screen visuals.
-- Anyone in the room can search Spotify's catalog and add songs to a shared queue.
+- Anyone in the room can search Spotify's catalog and add songs to a shared queue. If the host connects their Spotify account, added songs also get pushed live onto the host's real Spotify queue.
 
 ## How audio sharing works (and its limits)
 
@@ -22,7 +22,7 @@ Browser support for tab-audio capture varies:
 
 Because Spotify streams are DRM-protected, always share the **Spotify Web Player tab specifically** (not the whole desktop app) for the most reliable capture.
 
-The queue is a shared wishlist, not a remote control for the host's Spotify — search results come from Spotify's public catalog (no login needed), and it's up to the host to actually play picks from the queue in their own Spotify.
+The queue is always a shared wishlist that everyone can see, whether or not the host connects Spotify — search results come from Spotify's public catalog (no login needed for that part). See [Real Spotify queueing](#real-spotify-queueing-optional) below for how the host can make "Add" also queue live on their own player.
 
 ## Project structure
 
@@ -53,7 +53,7 @@ This installs dependencies for the root, `client/`, and `server/` workspaces.
 cp .env.example server/.env
 ```
 
-Edit `server/.env` and fill in `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` from your Spotify Developer Dashboard app.
+Edit `server/.env` and fill in `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` from your Spotify Developer Dashboard app. Leave `SPOTIFY_REDIRECT_URI` at its default for local dev, or see [Real Spotify queueing](#real-spotify-queueing-optional) to set it up.
 
 Optionally copy `client/.env.example` to `client/.env` if you need to point the client at a non-default server URL.
 
@@ -91,6 +91,7 @@ Add these environment variables in the Render dashboard:
 | --- | --- |
 | `SPOTIFY_CLIENT_ID` | from your Spotify Developer app |
 | `SPOTIFY_CLIENT_SECRET` | from your Spotify Developer app |
+| `SPOTIFY_REDIRECT_URI` | `https://<your-render-service>.onrender.com/api/spotify/callback` — see [Real Spotify queueing](#real-spotify-queueing-optional) |
 | `CLIENT_ORIGIN` | your Vercel URL (set this after step 3 below, then redeploy) |
 | `METERED_API_KEY` | optional, see step 4 |
 | `METERED_DOMAIN` | optional, see step 4 |
@@ -128,8 +129,28 @@ The server exposes these as `GET /api/ice-servers`; the client fetches this once
 
 Open the Vercel URL from two devices on genuinely different networks (e.g. your laptop on WiFi and your phone on cellular data) and confirm room joining, live audio sharing, and the queue all work.
 
+## Real Spotify queueing (optional)
+
+By default, "Add" just adds a track to the shared in-app queue list — a wishlist everyone can see, but nobody's Spotify player actually changes. If the host connects their Spotify account, "Add" *also* pushes the track straight onto the host's real Spotify queue via Spotify's Web API.
+
+Requirements:
+
+- The host's Spotify account must have **Premium** (Spotify's playback-control API returns an error for free accounts).
+- The host must already have Spotify open and playing something (an "active device") — Spotify has no way to queue a track if nothing is currently playing.
+- Only the current host can connect Spotify (it's their player everyone is listening to). If the host changes (e.g. the original host disconnects), the new host needs to connect their own account.
+
+Setup:
+
+1. In your [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) app settings, add both redirect URIs under **Redirect URIs**:
+   - `http://127.0.0.1:4000/api/spotify/callback` (local dev — Spotify requires the `127.0.0.1` loopback literal, not `localhost`)
+   - `https://<your-render-service>.onrender.com/api/spotify/callback` (production — must be HTTPS)
+2. Set `SPOTIFY_REDIRECT_URI` in `server/.env` (local) and on Render (production) to match whichever one applies.
+3. In the room, the host clicks **Connect Spotify** (visible only to the host) and grants access in the popup that opens. Once granted, everyone in the room sees a "Spotify connected" indicator.
+4. From then on, adding a song shows whether it was also queued live on Spotify, or an explanation if it couldn't be (not Premium, or nothing playing yet).
+
+Spotify tokens are stored in-memory per room (matching the rest of the app's ephemeral, no-database design) and are cleared if the room closes or the host changes.
+
 ## Notes / future ideas
 
-- Rooms are ephemeral and stored in memory only — restarting the server clears all rooms.
+- Rooms are ephemeral and stored in memory only — restarting the server clears all rooms (including any connected Spotify session).
 - Audio relay uses a simple WebRTC mesh (host connects directly to each listener), which is fine for small groups of friends but won't scale to large rooms. A future upgrade would move to an SFU (e.g. mediasoup, LiveKit).
-- The queue could later be upgraded to actually control the host's Spotify playback via the Spotify Connect API, if the host connects their account (requires Spotify Premium + OAuth login).

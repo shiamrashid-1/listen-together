@@ -5,6 +5,7 @@ import { useAudioMesh } from "../hooks/useAudioMesh";
 import RoomCode from "../components/RoomCode";
 import ParticipantList from "../components/ParticipantList";
 import AudioShare from "../components/AudioShare";
+import SpotifyConnect from "../components/SpotifyConnect";
 import TrackSearch from "../components/TrackSearch";
 import Queue from "../components/Queue";
 
@@ -59,6 +60,12 @@ export default function Room() {
               stopSharing={audioMesh.stopSharing}
             />
             <ParticipantList participants={room.participants} selfId={selfId} isSharing={room.isSharing} />
+            <SpotifyConnect
+              isHost={isHost}
+              roomCode={room.code}
+              selfId={selfId}
+              spotifyConnected={room.spotifyConnected}
+            />
           </div>
 
           <div className="space-y-6">

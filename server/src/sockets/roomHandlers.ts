@@ -1,5 +1,6 @@
 import type { Server, Socket } from "socket.io";
 import * as roomStore from "../rooms/roomStore.js";
+import * as tokenStore from "../spotify/tokenStore.js";
 
 export function registerRoomHandlers(io: Server, socket: Socket) {
   socket.on("room:create", ({ name }: { name: string }, callback: (res: { ok: true; room: ReturnType<typeof roomStore.createRoom> } | { ok: false; error: string }) => void) => {
@@ -31,7 +32,24 @@ export function registerRoomHandlers(io: Server, socket: Socket) {
 
   socket.on("disconnect", () => {
     const result = roomStore.removeParticipant(socket.id);
-    if (!result || result.deleted) return;
+    if (!result) return;
+
+    if (result.deleted) {
+      tokenStore.clear(result.room.code);
+      return;
+    }
+
+    if (result.hostChanged) {
+      // The new host hasn't authorized anything — don't carry over the
+      // previous host's Spotify connection.
+      tokenStore.clear(result.room.code);
+      const updated = roomStore.setSpotifyConnected(result.room.code, false);
+      if (updated) {
+        io.to(updated.code).emit("room:state", updated);
+        return;
+      }
+    }
+
     io.to(result.room.code).emit("room:state", result.room);
   });
 }

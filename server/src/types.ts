@@ -21,4 +21,5 @@ export interface RoomState {
   queue: QueueTrack[];
   nowPlayingId: string | null;
   isSharing: boolean;
+  spotifyConnected: boolean;
 }

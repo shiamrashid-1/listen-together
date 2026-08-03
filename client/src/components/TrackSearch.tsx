@@ -3,11 +3,18 @@ import { SERVER_URL, socket } from "../lib/socket";
 import { formatDuration } from "../lib/format";
 import type { SpotifyTrackResult } from "../types";
 
+const SPOTIFY_ERROR_MESSAGES: Record<string, string> = {
+  premium_required: "Added to queue, but auto-queueing on Spotify needs Premium.",
+  no_active_device: "Added to queue, but open Spotify and start playing something first.",
+  unknown: "Added to queue, but Spotify auto-queue failed.",
+};
+
 export default function TrackSearch() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SpotifyTrackResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [statusByUri, setStatusByUri] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -36,8 +43,33 @@ export default function TrackSearch() {
     return () => clearTimeout(timeout);
   }, [query]);
 
+  const showStatus = (uri: string, message: string) => {
+    setStatusByUri((prev) => ({ ...prev, [uri]: message }));
+    setTimeout(() => {
+      setStatusByUri((prev) => {
+        const next = { ...prev };
+        delete next[uri];
+        return next;
+      });
+    }, 4000);
+  };
+
   const addToQueue = (track: SpotifyTrackResult) => {
-    socket.emit("queue:add", track);
+    socket.emit(
+      "queue:add",
+      track,
+      (res: { ok: true; pushedToSpotify: boolean; spotifyError?: string } | { ok: false; error: string }) => {
+        if (!res.ok) {
+          showStatus(track.uri, res.error);
+        } else if (res.pushedToSpotify) {
+          showStatus(track.uri, "Added and queued live on Spotify.");
+        } else if (res.spotifyError) {
+          showStatus(track.uri, SPOTIFY_ERROR_MESSAGES[res.spotifyError] ?? SPOTIFY_ERROR_MESSAGES.unknown);
+        } else {
+          showStatus(track.uri, "Added to queue.");
+        }
+      }
+    );
   };
 
   return (
@@ -67,9 +99,13 @@ export default function TrackSearch() {
               )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-white">{track.name}</p>
-                <p className="truncate text-xs text-white/50">
-                  {track.artists} · {formatDuration(track.durationMs)}
-                </p>
+                {statusByUri[track.uri] ? (
+                  <p className="truncate text-xs text-brand">{statusByUri[track.uri]}</p>
+                ) : (
+                  <p className="truncate text-xs text-white/50">
+                    {track.artists} · {formatDuration(track.durationMs)}
+                  </p>
+                )}
               </div>
               <button
                 onClick={() => addToQueue(track)}

@@ -4,6 +4,7 @@ import cors from "cors";
 import { createServer } from "node:http";
 import { Server } from "socket.io";
 import { spotifyRouter } from "./routes/spotify.js";
+import { createSpotifyAuthRouter } from "./routes/spotifyAuth.js";
 import { iceServersRouter } from "./routes/iceServers.js";
 import { registerRoomHandlers } from "./sockets/roomHandlers.js";
 import { registerSignalingHandlers } from "./sockets/signalingHandlers.js";
@@ -24,6 +25,10 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: CLIENT_ORIGIN },
 });
+
+// Mounted after `io` exists because the OAuth callback needs to broadcast
+// the updated room state once the host finishes connecting Spotify.
+app.use("/api/spotify", createSpotifyAuthRouter(io));
 
 io.on("connection", (socket) => {
   registerRoomHandlers(io, socket);

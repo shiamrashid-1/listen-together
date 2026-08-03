@@ -74,3 +74,107 @@ export async function searchTracks(query: string, limit = 10): Promise<SpotifyTr
     durationMs: item.duration_ms,
   }));
 }
+
+// --- Authorization Code flow (per-host, used to control real playback) ---
+
+const SPOTIFY_SCOPES = "user-modify-playback-state user-read-playback-state";
+
+function getCredentials() {
+  const clientId = process.env.SPOTIFY_CLIENT_ID;
+  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      "Spotify credentials are not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in server/.env."
+    );
+  }
+  return { clientId, clientSecret };
+}
+
+export function getAuthorizeUrl(state: string, redirectUri: string): string {
+  const { clientId } = getCredentials();
+  const url = new URL("https://accounts.spotify.com/authorize");
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("scope", SPOTIFY_SCOPES);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("state", state);
+  return url.toString();
+}
+
+export interface HostTokenResult {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn: number;
+}
+
+export async function exchangeCodeForTokens(code: string, redirectUri: string): Promise<HostTokenResult> {
+  const { clientId, clientSecret } = getCredentials();
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+    }).toString(),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Spotify token exchange failed (${response.status})`);
+  }
+
+  const data = (await response.json()) as {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+  };
+  return { accessToken: data.access_token, refreshToken: data.refresh_token, expiresIn: data.expires_in };
+}
+
+export async function refreshAccessToken(refreshToken: string): Promise<HostTokenResult> {
+  const { clientId, clientSecret } = getCredentials();
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }).toString(),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Spotify token refresh failed (${response.status})`);
+  }
+
+  const data = (await response.json()) as {
+    access_token: string;
+    refresh_token?: string;
+    expires_in: number;
+  };
+  return { accessToken: data.access_token, refreshToken: data.refresh_token, expiresIn: data.expires_in };
+}
+
+export type QueueTrackResult =
+  | { ok: true }
+  | { ok: false; error: "premium_required" | "no_active_device" | "unknown" };
+
+export async function queueTrackForUser(accessToken: string, uri: string): Promise<QueueTrackResult> {
+  const url = new URL("https://api.spotify.com/v1/me/player/queue");
+  url.searchParams.set("uri", uri);
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (response.status === 204 || response.ok) return { ok: true };
+  if (response.status === 403) return { ok: false, error: "premium_required" };
+  if (response.status === 404) return { ok: false, error: "no_active_device" };
+  return { ok: false, error: "unknown" };
+}
