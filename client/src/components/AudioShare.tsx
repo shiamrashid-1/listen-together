@@ -7,7 +7,9 @@ interface AudioShareProps {
   isSharing: boolean;
   captureError: string | null;
   remoteStream: MediaStream | null;
-  audioFallbackUrl: string | null;
+  fallbackActive: boolean;
+  fallbackNeedsResume: boolean;
+  resumeFallbackAudio: () => void;
   startSharing: () => void;
   stopSharing: () => void;
 }
@@ -18,16 +20,19 @@ export default function AudioShare({
   isSharing,
   captureError,
   remoteStream,
-  audioFallbackUrl,
+  fallbackActive,
+  fallbackNeedsResume,
+  resumeFallbackAudio,
   startSharing,
   stopSharing,
 }: AudioShareProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [needsPlaybackTap, setNeedsPlaybackTap] = useState(false);
 
-  // WebRTC (remoteStream) takes priority for low latency. If it hasn't
-  // connected, fall back to the plain HTTP stream, which works on any
-  // network/browser but runs a few seconds behind live.
+  // WebRTC (remoteStream) plays through a plain <audio> element. The
+  // socket-relayed fallback instead plays via the Web Audio API directly
+  // (see LiveAudioPlayer in useAudioMesh) - nothing to wire up here besides
+  // clearing the element when it's not needed.
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
@@ -39,16 +44,9 @@ export default function AudioShare({
       return;
     }
 
-    if (audioFallbackUrl) {
-      el.srcObject = null;
-      if (el.src !== audioFallbackUrl) el.src = audioFallbackUrl;
-      el.play().catch(() => setNeedsPlaybackTap(true));
-      return;
-    }
-
     el.srcObject = null;
     el.removeAttribute("src");
-  }, [remoteStream, audioFallbackUrl]);
+  }, [remoteStream]);
 
   if (isHost) {
     return (
@@ -94,7 +92,7 @@ export default function AudioShare({
       <p className="text-xs font-medium uppercase tracking-wide text-white/50">Room audio</p>
       <audio ref={audioRef} autoPlay />
       {roomIsSharing ? (
-        remoteStream || audioFallbackUrl ? (
+        remoteStream ? (
           needsPlaybackTap ? (
             <button
               onClick={() => {
@@ -105,11 +103,20 @@ export default function AudioShare({
             >
               Tap to listen
             </button>
-          ) : remoteStream ? (
+          ) : (
             <p className="mt-2 flex items-center gap-2 text-sm text-brand">
               <span className="h-2 w-2 animate-pulse rounded-full bg-brand" />
               Listening live
             </p>
+          )
+        ) : fallbackActive ? (
+          fallbackNeedsResume ? (
+            <button
+              onClick={resumeFallbackAudio}
+              className="mt-3 w-full rounded-lg bg-brand py-2.5 font-semibold text-black transition hover:brightness-110"
+            >
+              Tap to listen
+            </button>
           ) : (
             <div className="mt-2 space-y-1">
               <p className="flex items-center gap-2 text-sm text-amber-300">

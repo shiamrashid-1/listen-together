@@ -136,33 +136,102 @@ async function logSelectedCandidatePair(pc: RTCPeerConnection, label: string) {
   }
 }
 
+/**
+ * Plays a continuous stream of independently-decodable MP3 chunks (produced
+ * by the server's ffmpeg relay) via the Web Audio API, scheduling each
+ * decoded buffer back-to-back for gapless playback.
+ *
+ * This exists for listeners whose network blocks long-lived streaming HTTP
+ * connections outright (some proxies/firewalls specifically flag and kill
+ * those, even while allowing the very same domain's normal API/WebSocket
+ * traffic through). Chunks arrive as binary Socket.IO events over the
+ * already-connected, already-proven WebSocket instead of a separate HTTP
+ * stream, so it stays viable anywhere the rest of the app already works.
+ */
+class LiveAudioPlayer {
+  private ctx: AudioContext;
+  private nextStartTime = 0;
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor() {
+    const AudioContextCtor =
+      window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    this.ctx = new AudioContextCtor();
+  }
+
+  get needsResume(): boolean {
+    return this.ctx.state === "suspended";
+  }
+
+  resume(): Promise<void> {
+    return this.ctx.resume();
+  }
+
+  pushChunk(chunk: ArrayBuffer) {
+    this.chain = this.chain.then(() => this.decodeAndSchedule(chunk));
+  }
+
+  private async decodeAndSchedule(chunk: ArrayBuffer) {
+    let buffer: AudioBuffer;
+    try {
+      buffer = await this.ctx.decodeAudioData(chunk);
+    } catch {
+      return; // an occasional non-frame-aligned fragment - safe to drop
+    }
+    // If we've fallen behind (e.g. after a decode error or a network hiccup),
+    // catch back up to "now" instead of trying to play a growing backlog.
+    if (this.nextStartTime < this.ctx.currentTime) this.nextStartTime = this.ctx.currentTime;
+
+    const source = this.ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.ctx.destination);
+    const startAt = Math.max(this.ctx.currentTime + 0.05, this.nextStartTime);
+    source.start(startAt);
+    this.nextStartTime = startAt + buffer.duration;
+  }
+
+  close() {
+    this.ctx.close().catch(() => {});
+  }
+}
+
 interface UseAudioMeshOptions {
   isHost: boolean;
   participants: Participant[];
   selfId: string | null;
-  roomCode: string;
 }
 
 /**
- * Mesh WebRTC audio relay, with an HTTP-stream fallback for listeners whose
- * network blocks WebRTC entirely. The host captures tab/system audio via
- * getDisplayMedia, opens one RTCPeerConnection per listener carrying the
+ * Mesh WebRTC audio relay, with a Socket.IO-delivered fallback for listeners
+ * whose network blocks WebRTC entirely. The host captures tab/system audio
+ * via getDisplayMedia, opens one RTCPeerConnection per listener carrying the
  * same captured track, and (always, in parallel) records that same audio
  * into a live MP3 relay on the server via `audio:chunk`. Listeners try
  * WebRTC first for low latency, and if it doesn't connect within
- * WEBRTC_FALLBACK_TIMEOUT_MS, switch to plain HTTP streaming instead - that
- * works over literally any network/browser, since it's indistinguishable
- * from loading a normal web page.
+ * WEBRTC_FALLBACK_TIMEOUT_MS, subscribe to that relay's output as binary
+ * chunks over their existing socket connection instead - the same
+ * connection already carrying room state/chat/signaling, so it keeps
+ * working even on networks that block dedicated streaming HTTP connections.
  */
-export function useAudioMesh({ isHost, participants, selfId, roomCode }: UseAudioMeshOptions) {
+export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptions) {
   const [isSharing, setIsSharing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [audioFallbackUrl, setAudioFallbackUrl] = useState<string | null>(null);
+  const [fallbackActive, setFallbackActive] = useState(false);
+  const [fallbackNeedsResume, setFallbackNeedsResume] = useState(false);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const fallbackPlayerRef = useRef<LiveAudioPlayer | null>(null);
+  const fallbackSubscribedRef = useRef(false);
+
+  const resumeFallbackAudio = useCallback(() => {
+    fallbackPlayerRef.current?.resume().then(
+      () => setFallbackNeedsResume(false),
+      () => setFallbackNeedsResume(true)
+    );
+  }, []);
 
   const closePeer = useCallback((peerId: string) => {
     const pc = peersRef.current.get(peerId);
@@ -321,29 +390,44 @@ export function useAudioMesh({ isHost, participants, selfId, roomCode }: UseAudi
   useEffect(() => {
     if (isHost) return;
 
+    const activateFallback = () => {
+      if (fallbackSubscribedRef.current) return;
+      fallbackSubscribedRef.current = true;
+      console.warn("[audio] WebRTC unavailable - falling back to socket-relayed audio stream");
+      const player = fallbackPlayerRef.current ?? new LiveAudioPlayer();
+      fallbackPlayerRef.current = player;
+      player.resume().catch(() => {});
+      setFallbackNeedsResume(player.needsResume);
+      socket.emit("audio:relay-subscribe");
+      setFallbackActive(true);
+    };
+
+    const deactivateFallback = () => {
+      if (!fallbackSubscribedRef.current) return;
+      fallbackSubscribedRef.current = false;
+      socket.emit("audio:relay-unsubscribe");
+      setFallbackActive(false);
+      setFallbackNeedsResume(false);
+    };
+
     const handleOffer = async ({ from, sdp }: { from: string; sdp: RTCSessionDescriptionInit }) => {
       closePeer(from);
-      setAudioFallbackUrl(null); // give WebRTC a fresh chance before falling back again
+      deactivateFallback(); // give WebRTC a fresh chance before falling back again
 
       const pc = new RTCPeerConnection({ iceServers: await getIceServers() });
       peersRef.current.set(from, pc);
 
       const label = `listener<-${from.slice(0, 6)}`;
-      const activateFallback = () => {
-        if (peersRef.current.get(from) !== pc) return; // this peer's already been replaced/closed
-        console.warn(`[webrtc:${label}] falling back to HTTP relay stream`);
-        setAudioFallbackUrl(`${SERVER_URL}/api/audio/live/${roomCode}`);
-      };
       const fallbackTimer = setTimeout(() => {
-        if (pc.connectionState !== "connected") activateFallback();
+        if (peersRef.current.get(from) === pc && pc.connectionState !== "connected") activateFallback();
       }, WEBRTC_FALLBACK_TIMEOUT_MS);
 
       logConnectionDiagnostics(pc, label, () => {
         if (pc.connectionState === "connected") {
           clearTimeout(fallbackTimer);
-          setAudioFallbackUrl(null); // WebRTC came through after all - drop the fallback
+          deactivateFallback(); // WebRTC came through after all - drop the fallback
         }
-        if (pc.connectionState === "failed") activateFallback();
+        if (pc.connectionState === "failed" && peersRef.current.get(from) === pc) activateFallback();
         if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
           setRemoteStream((prev) => (peersRef.current.get(from) === pc ? null : prev));
         }
@@ -370,13 +454,19 @@ export function useAudioMesh({ isHost, participants, selfId, roomCode }: UseAudi
       if (pc && candidate) pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
     };
 
+    const handleRelayChunk = (chunk: ArrayBuffer) => {
+      fallbackPlayerRef.current?.pushChunk(chunk);
+    };
+
     socket.on("webrtc:offer", handleOffer);
     socket.on("webrtc:ice-candidate", handleIceCandidate);
+    socket.on("audio:relay-chunk", handleRelayChunk);
     return () => {
       socket.off("webrtc:offer", handleOffer);
       socket.off("webrtc:ice-candidate", handleIceCandidate);
+      socket.off("audio:relay-chunk", handleRelayChunk);
     };
-  }, [isHost, closePeer, roomCode]);
+  }, [isHost, closePeer]);
 
   // Host side: receive answers and ICE candidates from listeners.
   useEffect(() => {
@@ -405,9 +495,20 @@ export function useAudioMesh({ isHost, participants, selfId, roomCode }: UseAudi
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
       mediaRecorderRef.current?.stop();
       closeAllPeers();
+      if (fallbackSubscribedRef.current) socket.emit("audio:relay-unsubscribe");
+      fallbackPlayerRef.current?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { isSharing, captureError, remoteStream, audioFallbackUrl, startSharing, stopSharing };
+  return {
+    isSharing,
+    captureError,
+    remoteStream,
+    fallbackActive,
+    fallbackNeedsResume,
+    resumeFallbackAudio,
+    startSharing,
+    stopSharing,
+  };
 }
