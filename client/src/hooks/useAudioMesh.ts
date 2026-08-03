@@ -28,6 +28,53 @@ async function getIceServers(): Promise<RTCIceServer[]> {
 export const isDisplayCaptureSupported =
   typeof navigator !== "undefined" && Boolean(navigator.mediaDevices?.getDisplayMedia);
 
+/**
+ * Chrome negotiates mono, modest-bitrate Opus by default, which is tuned for
+ * voice calls, not music. This rewrites the offer's Opus fmtp line to request
+ * stereo and a much higher bitrate for far better music fidelity.
+ */
+function preferHighQualityOpus(sdp: string): string {
+  const opusPayload = sdp.match(/a=rtpmap:(\d+) opus\/48000/)?.[1];
+  if (!opusPayload) return sdp;
+
+  const fmtpLine = new RegExp(`a=fmtp:${opusPayload} .*`);
+  const qualityParams = "stereo=1;sprop-stereo=1;maxaveragebitrate=192000;maxplaybackrate=48000";
+
+  if (fmtpLine.test(sdp)) {
+    return sdp.replace(fmtpLine, (line) => {
+      const params = line
+        .replace(`a=fmtp:${opusPayload} `, "")
+        .split(";")
+        .filter((p) => !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate)=/.test(p));
+      return `a=fmtp:${opusPayload} ${[...params, qualityParams].join(";")}`;
+    });
+  }
+
+  return sdp.replace(
+    new RegExp(`(a=rtpmap:${opusPayload} opus/48000/2\\r?\\n)`),
+    `$1a=fmtp:${opusPayload} ${qualityParams}\r\n`
+  );
+}
+
+/**
+ * Chrome buffers incoming audio to smooth out network jitter, which is
+ * great for choppy connections but adds noticeable lag for a "live" feel.
+ * These are Chrome-only hints (safe no-ops elsewhere) that trade a little
+ * jitter resilience for much lower playout latency.
+ */
+function reduceReceiverLatency(receiver: RTCRtpReceiver) {
+  const tunableReceiver = receiver as RTCRtpReceiver & {
+    playoutDelayHint?: number;
+    jitterBufferTarget?: number;
+  };
+  try {
+    tunableReceiver.playoutDelayHint = 0;
+    tunableReceiver.jitterBufferTarget = 40;
+  } catch {
+    // Non-Chrome browsers may not support these - safe to ignore.
+  }
+}
+
 interface UseAudioMeshOptions {
   isHost: boolean;
   participants: Participant[];
@@ -78,6 +125,7 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
       };
 
       const offer = await pc.createOffer();
+      if (offer.sdp) offer.sdp = preferHighQualityOpus(offer.sdp);
       await pc.setLocalDescription(offer);
       socket.emit("webrtc:offer", { to: listenerId, sdp: offer });
     },
@@ -89,7 +137,15 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
-        audio: true,
+        audio: {
+          // These default to "on" for voice calls but actively hurt music:
+          // echo cancellation smears transients, noise suppression/AGC
+          // squash dynamics and can duck the whole track.
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 2,
+        } as MediaTrackConstraints,
       });
 
       const audioTracks = stream.getAudioTracks();
@@ -162,6 +218,7 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
         }
       };
       pc.ontrack = (event) => {
+        reduceReceiverLatency(event.receiver);
         setRemoteStream(event.streams[0] ?? null);
       };
       pc.onconnectionstatechange = () => {
