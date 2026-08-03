@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { socket } from "../lib/socket";
 import type { RoomState } from "../types";
 
@@ -22,9 +22,40 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
 
+  // Track the room/name we're supposed to be in, independent of React state
+  // timing, so a reconnect handler can always see the latest values.
+  const activeRoomRef = useRef<{ code: string; name: string } | null>(null);
+  const hasConnectedBeforeRef = useRef(false);
+
   useEffect(() => {
     const handleRoomState = (nextRoom: RoomState) => setRoom(nextRoom);
-    const handleConnect = () => setSelfId(socket.id ?? null);
+
+    const handleConnect = () => {
+      setSelfId(socket.id ?? null);
+
+      // The server gives every new socket connection a blank slate - it has
+      // no memory of which room this browser tab was in. If we reconnected
+      // (rather than connecting for the first time) while believing we were
+      // still in a room, silently rejoin so server-side state (needed for
+      // adding to the queue, sharing audio, etc.) is restored.
+      if (hasConnectedBeforeRef.current && activeRoomRef.current) {
+        const { code, name } = activeRoomRef.current;
+        socket.emit(
+          "room:join",
+          { code, name },
+          (res: { ok: true; room: RoomState } | { ok: false; error: string }) => {
+            if (res.ok) {
+              setRoom(res.room);
+              setSelfId(socket.id ?? null);
+            } else {
+              setConnectionError("Lost connection to the room and couldn't rejoin. Try refreshing.");
+            }
+          }
+        );
+      }
+      hasConnectedBeforeRef.current = true;
+    };
+
     const handleConnectError = () => setConnectionError("Couldn't reach the server. Is it running?");
 
     socket.on("room:state", handleRoomState);
@@ -74,6 +105,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           { name },
           (res: { ok: true; room: RoomState } | { ok: false; error: string }) => {
             if (res.ok) {
+              activeRoomRef.current = { code: res.room.code, name };
               setRoom(res.room);
               setSelfId(socket.id ?? null);
               resolve(res.room);
@@ -98,6 +130,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           { code, name },
           (res: { ok: true; room: RoomState } | { ok: false; error: string }) => {
             if (res.ok) {
+              activeRoomRef.current = { code: res.room.code, name };
               setRoom(res.room);
               setSelfId(socket.id ?? null);
               resolve(res.room);
@@ -112,6 +145,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   );
 
   const leaveRoom = useCallback(() => {
+    activeRoomRef.current = null;
     socket.disconnect();
     setRoom(null);
     setSelfId(null);
