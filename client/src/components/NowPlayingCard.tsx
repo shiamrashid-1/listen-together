@@ -1,45 +1,60 @@
 import { useEffect, useState } from "react";
 import { socket } from "../lib/socket";
 import { formatDuration } from "../lib/format";
-import type { NowPlaying } from "../types";
+import type { PlaybackInfo } from "../types";
 
 /**
- * Ticks a live "elapsed ms" value forward based on `startedAt`, without any
- * network chatter - the server only tells us when a track started, and we
- * derive progress locally from the clock. Resyncs instantly whenever the
- * server sends a new `nowPlaying` (new track, or a skip/restart).
+ * Ticks a live "elapsed ms" value forward from `progressMs`/`fetchedAt`,
+ * without any network chatter in between broadcasts. Pauses ticking when the
+ * source reports playback is paused. Resyncs instantly whenever a fresh
+ * `PlaybackInfo` arrives.
  */
-function useElapsedMs(nowPlaying: NowPlaying | null): number {
+function useElapsedMs(playback: PlaybackInfo | null): number {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    if (!nowPlaying) {
+    if (!playback) {
       setElapsed(0);
       return;
     }
-    const tick = () => setElapsed(Math.min(Date.now() - nowPlaying.startedAt, nowPlaying.track.durationMs));
+
+    const tick = () => {
+      const base = playback.progressMs + (playback.isPlaying ? Date.now() - playback.fetchedAt : 0);
+      setElapsed(Math.min(Math.max(base, 0), playback.track.durationMs));
+    };
     tick();
+
+    if (!playback.isPlaying) return;
     const id = setInterval(tick, 250);
     return () => clearInterval(id);
-  }, [nowPlaying]);
+  }, [playback]);
 
   return elapsed;
 }
 
-export default function NowPlayingCard({ nowPlaying }: { nowPlaying: NowPlaying | null }) {
-  const elapsed = useElapsedMs(nowPlaying);
+interface NowPlayingCardProps {
+  playback: PlaybackInfo | null;
+  /** Hide the skip control when displaying real Spotify state (we don't control transport). */
+  showSkip: boolean;
+  emptyMessage?: string;
+}
+
+export default function NowPlayingCard({ playback, showSkip, emptyMessage }: NowPlayingCardProps) {
+  const elapsed = useElapsedMs(playback);
   const skip = () => socket.emit("queue:skip");
 
-  if (!nowPlaying) {
+  if (!playback) {
     return (
       <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
         <p className="text-xs font-medium uppercase tracking-wide text-white/50">Now playing</p>
-        <p className="mt-3 text-sm text-white/50">Nothing queued yet - add a song below to get started.</p>
+        <p className="mt-3 text-sm text-white/50">
+          {emptyMessage ?? "Nothing queued yet - add a song below to get started."}
+        </p>
       </div>
     );
   }
 
-  const { track } = nowPlaying;
+  const { track } = playback;
   const progressPercent = track.durationMs > 0 ? Math.min(100, (elapsed / track.durationMs) * 100) : 0;
 
   return (
@@ -55,15 +70,18 @@ export default function NowPlayingCard({ nowPlaying }: { nowPlaying: NowPlaying 
         <div className="min-w-0 flex-1">
           <p className="truncate text-base font-semibold text-white">{track.name}</p>
           <p className="truncate text-sm text-white/60">{track.artists}</p>
-          <p className="mt-1 truncate text-xs text-white/40">added by {track.addedBy}</p>
+          {track.addedBy ? <p className="mt-1 truncate text-xs text-white/40">added by {track.addedBy}</p> : null}
+          {!playback.isPlaying ? <p className="mt-1 truncate text-xs text-amber-400/80">Paused on Spotify</p> : null}
         </div>
-        <button
-          onClick={skip}
-          title="Skip"
-          className="flex-shrink-0 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-white/70 transition hover:bg-white/10 hover:text-white"
-        >
-          Skip ▸
-        </button>
+        {showSkip ? (
+          <button
+            onClick={skip}
+            title="Skip"
+            className="flex-shrink-0 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-white/70 transition hover:bg-white/10 hover:text-white"
+          >
+            Skip ▸
+          </button>
+        ) : null}
       </div>
 
       <div className="mt-4">

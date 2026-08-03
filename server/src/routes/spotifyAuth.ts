@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Server } from "socket.io";
 import * as roomStore from "../rooms/roomStore.js";
 import * as tokenStore from "../spotify/tokenStore.js";
+import * as playbackPoller from "../spotify/playbackPoller.js";
 import { exchangeCodeForTokens, getAuthorizeUrl } from "../spotify/spotifyClient.js";
 
 function htmlPage(title: string, message: string, autoClose: boolean) {
@@ -93,7 +94,10 @@ export function createSpotifyAuthRouter(io: Server): Router {
       }
       tokenStore.set(state, tokens.accessToken, tokens.refreshToken, tokens.expiresIn);
       const updated = roomStore.setSpotifyConnected(state, true);
-      if (updated) io.to(updated.code).emit("room:state", updated);
+      if (updated) {
+        io.to(updated.code).emit("room:state", updated);
+        playbackPoller.startPolling(updated.code, io);
+      }
 
       res.send(htmlPage("Connected!", "Spotify is connected. You can close this window.", true));
     } catch (err) {
@@ -112,6 +116,7 @@ export function createSpotifyAuthRouter(io: Server): Router {
     }
 
     tokenStore.clear(code);
+    playbackPoller.stopPolling(code);
     const updated = roomStore.setSpotifyConnected(code, false);
     if (updated) io.to(updated.code).emit("room:state", updated);
     res.json({ ok: true });

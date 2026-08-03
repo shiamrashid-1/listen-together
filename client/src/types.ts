@@ -36,3 +36,35 @@ export interface SpotifyTrackResult {
   albumArt: string | null;
   durationMs: number;
 }
+
+/** A track as reported directly by Spotify's real playback/queue APIs. */
+export interface SpotifyPlaybackTrack {
+  name: string;
+  artists: string;
+  albumArt: string | null;
+  durationMs: number;
+}
+
+export interface SpotifyPlaybackState {
+  nowPlaying: {
+    track: SpotifyPlaybackTrack;
+    progressMs: number;
+    isPlaying: boolean;
+    fetchedAt: number;
+  } | null;
+  queue: SpotifyPlaybackTrack[];
+}
+
+/** Common shape the Now Playing card renders, regardless of where the data came from. */
+export interface PlaybackInfo {
+  track: {
+    name: string;
+    artists: string;
+    albumArt: string | null;
+    durationMs: number;
+    addedBy?: string;
+  };
+  progressMs: number;
+  isPlaying: boolean;
+  fetchedAt: number;
+}

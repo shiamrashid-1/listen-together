@@ -2,7 +2,15 @@ import { socket } from "../lib/socket";
 import { formatDuration } from "../lib/format";
 import type { QueueTrack } from "../types";
 
-export default function Queue({ queue }: { queue: QueueTrack[] }) {
+interface QueueProps {
+  queue: QueueTrack[];
+  /** True when showing Spotify's real queue, which we can't reorder/remove/play via the API. */
+  readOnly?: boolean;
+  title?: string;
+  emptyMessage?: string;
+}
+
+export default function Queue({ queue, readOnly = false, title, emptyMessage }: QueueProps) {
   const move = (index: number, direction: -1 | 1) => {
     const target = index + direction;
     if (target < 0 || target >= queue.length) return;
@@ -16,10 +24,12 @@ export default function Queue({ queue }: { queue: QueueTrack[] }) {
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-      <p className="text-xs font-medium uppercase tracking-wide text-white/50">Up next ({queue.length})</p>
+      <p className="text-xs font-medium uppercase tracking-wide text-white/50">
+        {title ?? "Up next"} ({queue.length})
+      </p>
 
       {queue.length === 0 ? (
-        <p className="mt-3 text-sm text-white/50">Nothing queued up. Search above to add more.</p>
+        <p className="mt-3 text-sm text-white/50">{emptyMessage ?? "Nothing queued up. Search above to add more."}</p>
       ) : (
         <ul className="mt-3 space-y-1">
           {queue.map((track, index) => (
@@ -35,41 +45,44 @@ export default function Queue({ queue }: { queue: QueueTrack[] }) {
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-white">{track.name}</p>
                 <p className="truncate text-xs text-white/50">
-                  {track.artists} · {formatDuration(track.durationMs)} · added by {track.addedBy}
+                  {track.artists} · {formatDuration(track.durationMs)}
+                  {track.addedBy ? ` · added by ${track.addedBy}` : ""}
                 </p>
               </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => move(index, -1)}
-                  disabled={index === 0}
-                  className="rounded p-1 text-white/50 transition hover:bg-white/10 hover:text-white disabled:opacity-20"
-                  title="Move up"
-                >
-                  ▲
-                </button>
-                <button
-                  onClick={() => move(index, 1)}
-                  disabled={index === queue.length - 1}
-                  className="rounded p-1 text-white/50 transition hover:bg-white/10 hover:text-white disabled:opacity-20"
-                  title="Move down"
-                >
-                  ▼
-                </button>
-                <button
-                  onClick={() => playNow(track.id)}
-                  className="rounded px-2 py-1 text-xs font-medium text-white/60 transition hover:bg-brand hover:text-black"
-                  title="Play now"
-                >
-                  Play
-                </button>
-                <button
-                  onClick={() => remove(track.id)}
-                  className="rounded p-1 text-white/40 transition hover:bg-red-500/10 hover:text-red-400"
-                  title="Remove"
-                >
-                  ✕
-                </button>
-              </div>
+              {!readOnly ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => move(index, -1)}
+                    disabled={index === 0}
+                    className="rounded p-1 text-white/50 transition hover:bg-white/10 hover:text-white disabled:opacity-20"
+                    title="Move up"
+                  >
+                    ▲
+                  </button>
+                  <button
+                    onClick={() => move(index, 1)}
+                    disabled={index === queue.length - 1}
+                    className="rounded p-1 text-white/50 transition hover:bg-white/10 hover:text-white disabled:opacity-20"
+                    title="Move down"
+                  >
+                    ▼
+                  </button>
+                  <button
+                    onClick={() => playNow(track.id)}
+                    className="rounded px-2 py-1 text-xs font-medium text-white/60 transition hover:bg-brand hover:text-black"
+                    title="Play now"
+                  >
+                    Play
+                  </button>
+                  <button
+                    onClick={() => remove(track.id)}
+                    className="rounded p-1 text-white/40 transition hover:bg-red-500/10 hover:text-red-400"
+                    title="Remove"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : null}
             </li>
           ))}
         </ul>

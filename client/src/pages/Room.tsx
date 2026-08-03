@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useRoom } from "../context/RoomContext";
 import { useAudioMesh } from "../hooks/useAudioMesh";
+import { useSpotifyPlayback } from "../hooks/useSpotifyPlayback";
 import RoomCode from "../components/RoomCode";
 import ParticipantList from "../components/ParticipantList";
 import AudioShare from "../components/AudioShare";
@@ -9,6 +10,7 @@ import SpotifyConnect from "../components/SpotifyConnect";
 import TrackSearch from "../components/TrackSearch";
 import NowPlayingCard from "../components/NowPlayingCard";
 import Queue from "../components/Queue";
+import type { PlaybackInfo, QueueTrack } from "../types";
 
 export default function Room() {
   const { code = "" } = useParams();
@@ -22,10 +24,43 @@ export default function Room() {
     participants: inRoom && room ? room.participants : [],
     selfId,
   });
+  const spotifyPlayback = useSpotifyPlayback(Boolean(room?.spotifyConnected));
 
   if (!inRoom || !room) {
     return <JoinPrompt code={code} />;
   }
+
+  // When the host has connected Spotify, real playback state (from Spotify
+  // itself) takes over the display entirely - it reflects whatever's
+  // actually playing/queued on their account, not just what was added
+  // through our search box.
+  const usingRealSpotify = room.spotifyConnected;
+  const nowPlayingInfo: PlaybackInfo | null = usingRealSpotify
+    ? spotifyPlayback?.nowPlaying
+      ? {
+          track: spotifyPlayback.nowPlaying.track,
+          progressMs: spotifyPlayback.nowPlaying.progressMs,
+          isPlaying: spotifyPlayback.nowPlaying.isPlaying,
+          fetchedAt: spotifyPlayback.nowPlaying.fetchedAt,
+        }
+      : null
+    : room.nowPlaying
+    ? {
+        track: room.nowPlaying.track,
+        progressMs: 0,
+        isPlaying: true,
+        fetchedAt: room.nowPlaying.startedAt,
+      }
+    : null;
+
+  const upNextTracks: QueueTrack[] = usingRealSpotify
+    ? (spotifyPlayback?.queue ?? []).map((track, index) => ({
+        id: `spotify-${index}`,
+        uri: "",
+        addedBy: "",
+        ...track,
+      }))
+    : room.queue;
 
   const handleLeave = () => {
     audioMesh.stopSharing();
@@ -70,9 +105,30 @@ export default function Room() {
           </div>
 
           <div className="space-y-6">
-            <NowPlayingCard nowPlaying={room.nowPlaying} />
+            <NowPlayingCard
+              playback={nowPlayingInfo}
+              showSkip={!usingRealSpotify}
+              emptyMessage={
+                usingRealSpotify
+                  ? "Nothing playing on Spotify right now."
+                  : "Nothing queued yet - add a song below to get started."
+              }
+            />
             <TrackSearch />
-            <Queue queue={room.queue} />
+            <Queue
+              queue={upNextTracks}
+              readOnly={usingRealSpotify}
+              emptyMessage={
+                usingRealSpotify
+                  ? "Nothing in your Spotify queue right now."
+                  : "Nothing queued up. Search above to add more."
+              }
+            />
+            {usingRealSpotify ? (
+              <p className="-mt-2 px-1 text-xs text-white/30">
+                Now playing and up next reflect the host's real Spotify queue.
+              </p>
+            ) : null}
           </div>
         </div>
       </div>
