@@ -1,5 +1,6 @@
 import type { Server, Socket } from "socket.io";
 import * as roomStore from "../rooms/roomStore.js";
+import * as audioRelay from "../audio/audioRelay.js";
 
 /**
  * Pure relay for WebRTC mesh signaling and audio-sharing lifecycle events.
@@ -29,7 +30,20 @@ export function registerSignalingHandlers(io: Server, socket: Socket) {
   socket.on("audio:sharing-stopped", () => {
     const code = socket.data.roomCode as string | undefined;
     if (!code) return;
+    audioRelay.stopRelay(code);
     const room = roomStore.setSharing(code, false);
     if (room) io.to(code).emit("room:state", room);
+  });
+
+  // Fallback path for listeners whose network can't establish a WebRTC
+  // connection at all (e.g. locked-down proxied networks). The host streams
+  // the same captured audio here as recorded webm/opus chunks, which get
+  // transcoded server-side into a plain HTTP MP3 stream (see audioRelay.ts
+  // and the /api/audio/live/:code route) - always-on alongside WebRTC so the
+  // fallback is instantly available if/when a listener needs it.
+  socket.on("audio:chunk", (chunk: ArrayBuffer) => {
+    const code = socket.data.roomCode as string | undefined;
+    if (!code) return;
+    audioRelay.pushChunk(code, Buffer.from(chunk));
   });
 }

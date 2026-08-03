@@ -6,6 +6,7 @@ import { Server } from "socket.io";
 import { spotifyRouter } from "./routes/spotify.js";
 import { createSpotifyAuthRouter } from "./routes/spotifyAuth.js";
 import { iceServersRouter } from "./routes/iceServers.js";
+import { audioRelayRouter } from "./routes/audioRelay.js";
 import { registerRoomHandlers } from "./sockets/roomHandlers.js";
 import { registerSignalingHandlers } from "./sockets/signalingHandlers.js";
 import { registerQueueHandlers } from "./sockets/queueHandlers.js";
@@ -22,6 +23,7 @@ app.use(express.json());
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/spotify", spotifyRouter);
 app.use("/api/ice-servers", iceServersRouter);
+app.use("/api/audio", audioRelayRouter);
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {

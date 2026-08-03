@@ -11,6 +11,8 @@ A very basic web app for listening to Spotify with friends in real time:
 
 The host clicks **Share my audio**, picks the browser tab playing `open.spotify.com`, and ticks **"Share tab audio"** in the browser prompt. That audio track is sent directly (peer-to-peer, mesh topology) to every other participant's browser over WebRTC — nothing is uploaded to a server.
 
+Some networks (strict corporate/school firewalls, proxies that block anything but tunneled HTTP) block WebRTC outright, even with a TURN relay configured. For listeners on networks like that, the app automatically falls back to a plain HTTP audio stream: the host's audio is also recorded and sent to the server, transcoded live to MP3, and served like an ordinary internet radio stream that any browser (including Safari/iPhone) can just play. It kicks in automatically after ~8 seconds if WebRTC hasn't connected, runs a few seconds behind live, and is clearly labeled as "backup stream" in the UI so it's obvious when it's active.
+
 Browser support for tab-audio capture varies:
 
 | Browser | Support |
@@ -29,7 +31,7 @@ The queue is always a shared wishlist that everyone can see, whether or not the 
 ```
 listen-together/
   client/   # Vite + React + TypeScript + Tailwind CSS (the web app)
-  server/   # Node + Express + Socket.io (room state, WebRTC signaling, Spotify search proxy)
+  server/   # Node + Express + Socket.io (room state, WebRTC signaling, Spotify search proxy, HTTP audio relay fallback)
 ```
 
 ## Setup
@@ -154,3 +156,4 @@ Spotify tokens are stored in-memory per room (matching the rest of the app's eph
 
 - Rooms are ephemeral and stored in memory only — restarting the server clears all rooms (including any connected Spotify session).
 - Audio relay uses a simple WebRTC mesh (host connects directly to each listener), which is fine for small groups of friends but won't scale to large rooms. A future upgrade would move to an SFU (e.g. mediasoup, LiveKit).
+- The HTTP fallback stream routes audio through the server (unlike WebRTC's peer-to-peer path), so it counts against server bandwidth and adds an `ffmpeg` process per actively-sharing room. Fine for casual/personal-scale use; a lot of concurrent rooms relying on the fallback at once could strain Render's free tier.

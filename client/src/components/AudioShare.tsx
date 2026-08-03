@@ -7,6 +7,7 @@ interface AudioShareProps {
   isSharing: boolean;
   captureError: string | null;
   remoteStream: MediaStream | null;
+  audioFallbackUrl: string | null;
   startSharing: () => void;
   stopSharing: () => void;
 }
@@ -17,20 +18,37 @@ export default function AudioShare({
   isSharing,
   captureError,
   remoteStream,
+  audioFallbackUrl,
   startSharing,
   stopSharing,
 }: AudioShareProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [needsPlaybackTap, setNeedsPlaybackTap] = useState(false);
 
+  // WebRTC (remoteStream) takes priority for low latency. If it hasn't
+  // connected, fall back to the plain HTTP stream, which works on any
+  // network/browser but runs a few seconds behind live.
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
-    el.srcObject = remoteStream;
+
     if (remoteStream) {
+      el.removeAttribute("src");
+      el.srcObject = remoteStream;
       el.play().catch(() => setNeedsPlaybackTap(true));
+      return;
     }
-  }, [remoteStream]);
+
+    if (audioFallbackUrl) {
+      el.srcObject = null;
+      if (el.src !== audioFallbackUrl) el.src = audioFallbackUrl;
+      el.play().catch(() => setNeedsPlaybackTap(true));
+      return;
+    }
+
+    el.srcObject = null;
+    el.removeAttribute("src");
+  }, [remoteStream, audioFallbackUrl]);
 
   if (isHost) {
     return (
@@ -76,7 +94,7 @@ export default function AudioShare({
       <p className="text-xs font-medium uppercase tracking-wide text-white/50">Room audio</p>
       <audio ref={audioRef} autoPlay />
       {roomIsSharing ? (
-        remoteStream ? (
+        remoteStream || audioFallbackUrl ? (
           needsPlaybackTap ? (
             <button
               onClick={() => {
@@ -87,11 +105,22 @@ export default function AudioShare({
             >
               Tap to listen
             </button>
-          ) : (
+          ) : remoteStream ? (
             <p className="mt-2 flex items-center gap-2 text-sm text-brand">
               <span className="h-2 w-2 animate-pulse rounded-full bg-brand" />
               Listening live
             </p>
+          ) : (
+            <div className="mt-2 space-y-1">
+              <p className="flex items-center gap-2 text-sm text-amber-300">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-amber-300" />
+                Listening (backup stream)
+              </p>
+              <p className="text-xs text-white/50">
+                Your network is blocking the direct connection, so audio is running a few seconds
+                behind live.
+              </p>
+            </div>
           )
         ) : (
           <p className="mt-2 text-sm text-white/60">Connecting to the host's audio…</p>

@@ -27,6 +27,7 @@ export default function Room() {
     isHost,
     participants: inRoom && room ? room.participants : [],
     selfId,
+    roomCode: code.toUpperCase(),
   });
   const spotifyPlayback = useSpotifyPlayback(Boolean(room?.spotifyConnected));
   const { messages, sendMessage } = useChat(room?.messages ?? EMPTY_MESSAGES);
@@ -97,6 +98,7 @@ export default function Room() {
               isSharing={audioMesh.isSharing}
               captureError={audioMesh.captureError}
               remoteStream={audioMesh.remoteStream}
+              audioFallbackUrl={audioMesh.audioFallbackUrl}
               startSharing={audioMesh.startSharing}
               stopSharing={audioMesh.stopSharing}
             />
