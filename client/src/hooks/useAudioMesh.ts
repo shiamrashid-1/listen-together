@@ -31,14 +31,20 @@ export const isDisplayCaptureSupported =
 /**
  * Chrome negotiates mono, modest-bitrate Opus by default, which is tuned for
  * voice calls, not music. This rewrites the offer's Opus fmtp line to request
- * stereo and a much higher bitrate for far better music fidelity.
+ * stereo and a somewhat higher bitrate for better music fidelity.
+ *
+ * Kept deliberately moderate (96kbps, not the ~192kbps we tried initially):
+ * a bitrate that's fine on the same WiFi network can be too much to sustain
+ * over a weaker/cellular cross-network link (especially relayed through
+ * TURN), causing packet loss that presents as choppy or fully silent audio -
+ * worse than the plain quality bump was meant to fix.
  */
 function preferHighQualityOpus(sdp: string): string {
   const opusPayload = sdp.match(/a=rtpmap:(\d+) opus\/48000/)?.[1];
   if (!opusPayload) return sdp;
 
   const fmtpLine = new RegExp(`a=fmtp:${opusPayload} .*`);
-  const qualityParams = "stereo=1;sprop-stereo=1;maxaveragebitrate=192000;maxplaybackrate=48000";
+  const qualityParams = "stereo=1;sprop-stereo=1;maxaveragebitrate=96000;maxplaybackrate=48000";
 
   if (fmtpLine.test(sdp)) {
     return sdp.replace(fmtpLine, (line) => {
@@ -57,21 +63,24 @@ function preferHighQualityOpus(sdp: string): string {
 }
 
 /**
- * Chrome buffers incoming audio to smooth out network jitter, which is
- * great for choppy connections but adds noticeable lag for a "live" feel.
- * These are Chrome-only hints (safe no-ops elsewhere) that trade a little
- * jitter resilience for much lower playout latency.
+ * Chrome buffers incoming audio to smooth out network jitter. We previously
+ * forced this buffer down to ~40ms for a snappier "live" feel, but that
+ * removes the slack a real cross-network/cellular connection needs to
+ * absorb jitter - on those links it caused enough dropped/late packets to
+ * make audio choppy or fully silent, even though the connection looked
+ * "connected." Chrome's default adaptive jitter buffer already balances
+ * latency against the jitter it's actually observing per-connection, so we
+ * only nudge it down a little instead of forcing it to a fixed floor - a
+ * modest latency win on good networks, without starving playback on bad ones.
  */
 function reduceReceiverLatency(receiver: RTCRtpReceiver) {
   const tunableReceiver = receiver as RTCRtpReceiver & {
-    playoutDelayHint?: number;
     jitterBufferTarget?: number;
   };
   try {
-    tunableReceiver.playoutDelayHint = 0;
-    tunableReceiver.jitterBufferTarget = 40;
+    tunableReceiver.jitterBufferTarget = 150;
   } catch {
-    // Non-Chrome browsers may not support these - safe to ignore.
+    // Non-Chrome browsers may not support this - safe to ignore.
   }
 }
 
