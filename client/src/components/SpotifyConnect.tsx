@@ -17,11 +17,9 @@ export default function SpotifyConnect({ isHost, roomCode, selfId, spotifyConnec
     ) : null;
   }
 
-  const connect = () => {
-    if (!selfId) return;
-    const url = `${SERVER_URL}/api/spotify/login?code=${roomCode}&socketId=${encodeURIComponent(selfId)}`;
-    window.open(url, "spotify-oauth", "width=480,height=720");
-  };
+  const connectUrl = selfId
+    ? `${SERVER_URL}/api/spotify/login?code=${roomCode}&socketId=${encodeURIComponent(selfId)}`
+    : null;
 
   const disconnect = async () => {
     if (!selfId) return;
@@ -62,12 +60,18 @@ export default function SpotifyConnect({ isHost, roomCode, selfId, spotifyConnec
         Connect your Spotify account so songs added to the queue also get pushed straight onto your
         Spotify player. Requires Spotify Premium and an active playback session.
       </p>
-      <button
-        onClick={connect}
-        className="mt-4 w-full rounded-lg border border-white/10 py-2.5 font-semibold text-white/80 transition hover:bg-brand hover:text-black"
+      <a
+        href={connectUrl ?? undefined}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-disabled={!connectUrl}
+        className={`mt-4 block w-full rounded-lg border border-white/10 py-2.5 text-center font-semibold text-white/80 transition hover:bg-brand hover:text-black ${
+          !connectUrl ? "pointer-events-none opacity-40" : ""
+        }`}
       >
         Connect Spotify
-      </button>
+      </a>
+      <p className="mt-2 text-center text-xs text-white/30">Opens Spotify login in a new tab.</p>
     </div>
   );
 }
