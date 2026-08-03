@@ -214,16 +214,26 @@ export function useAudioMesh({ isHost, participants, selfId, roomCode }: UseAudi
       return;
     }
     try {
-      const recorder = new MediaRecorder(stream, {
+      // Record from a fresh audio-only MediaStream, not the original capture
+      // stream - that one still carries its (stopped) video track, and some
+      // browsers reject/misbehave when an audio-only mimeType is paired with
+      // a stream that still lists a video track, even a stopped one.
+      const audioOnlyStream = new MediaStream(stream.getAudioTracks());
+      const recorder = new MediaRecorder(audioOnlyStream, {
         mimeType: "audio/webm;codecs=opus",
         audioBitsPerSecond: 128000,
       });
+      let chunksSent = 0;
       recorder.ondataavailable = async (event) => {
         if (event.data.size === 0) return;
         socket.emit("audio:chunk", await event.data.arrayBuffer());
+        chunksSent += 1;
+        if (chunksSent === 1) console.log("[audio] relay recorder sending chunks to server");
       };
+      recorder.onerror = (event) => console.error("[audio] relay recorder error:", event);
       recorder.start(RECORDER_CHUNK_INTERVAL_MS);
       mediaRecorderRef.current = recorder;
+      console.log("[audio] relay recorder started");
     } catch (err) {
       console.error("[audio] couldn't start relay recorder:", err);
     }

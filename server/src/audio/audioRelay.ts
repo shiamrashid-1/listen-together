@@ -55,8 +55,14 @@ function startRelay(code: string): RoomRelay {
   const relay: RoomRelay = { ffmpeg, subscribers: new Set() };
   relays.set(code, relay);
   attachPendingSubscribers(code, relay);
+  console.log(`[audio-relay:${code}] started (ffmpeg pid ${ffmpeg.pid})`);
 
+  let loggedFirstOutput = false;
   ffmpeg.stdout.on("data", (chunk: Buffer) => {
+    if (!loggedFirstOutput) {
+      loggedFirstOutput = true;
+      console.log(`[audio-relay:${code}] ffmpeg producing output (${relay.subscribers.size} subscriber(s) waiting)`);
+    }
     relay.subscribers.forEach((res) => {
       if (!res.writableEnded) res.write(chunk);
     });
@@ -85,9 +91,13 @@ function startRelay(code: string): RoomRelay {
 /** Feeds a chunk of the host's recorded audio into that room's relay, starting ffmpeg lazily on first use. */
 export function pushChunk(code: string, chunk: Buffer) {
   const upperCode = code.toUpperCase();
+  const existed = relays.has(upperCode);
   const relay = relays.get(upperCode) ?? startRelay(upperCode);
+  if (!existed) console.log(`[audio-relay:${upperCode}] first chunk received (${chunk.length} bytes)`);
   if (relay.ffmpeg.stdin.writable) {
     relay.ffmpeg.stdin.write(chunk);
+  } else {
+    console.warn(`[audio-relay:${upperCode}] stdin not writable, dropped chunk`);
   }
 }
 
@@ -118,10 +128,12 @@ export function subscribe(code: string, res: ServerResponse) {
 
   if (relay) {
     relay.subscribers.add(res);
+    console.log(`[audio-relay:${upperCode}] subscriber attached (${relay.subscribers.size} total)`);
     res.on("close", () => relay.subscribers.delete(res));
     return;
   }
 
+  console.log(`[audio-relay:${upperCode}] subscriber queued (no relay yet)`);
   let pending = pendingSubscribers.get(upperCode);
   if (!pending) {
     pending = new Set();
