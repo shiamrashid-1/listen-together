@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useRoom } from "../context/RoomContext";
 import { useAudioMesh } from "../hooks/useAudioMesh";
 import { useSpotifyPlayback } from "../hooks/useSpotifyPlayback";
+import { useChat } from "../hooks/useChat";
 import RoomCode from "../components/RoomCode";
 import ParticipantList from "../components/ParticipantList";
 import AudioShare from "../components/AudioShare";
@@ -10,7 +11,10 @@ import SpotifyConnect from "../components/SpotifyConnect";
 import TrackSearch from "../components/TrackSearch";
 import NowPlayingCard from "../components/NowPlayingCard";
 import Queue from "../components/Queue";
-import type { PlaybackInfo, QueueTrack } from "../types";
+import ChatBox from "../components/ChatBox";
+import type { ChatMessage, PlaybackInfo, QueueTrack } from "../types";
+
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 export default function Room() {
   const { code = "" } = useParams();
@@ -25,6 +29,7 @@ export default function Room() {
     selfId,
   });
   const spotifyPlayback = useSpotifyPlayback(Boolean(room?.spotifyConnected));
+  const { messages, sendMessage } = useChat(room?.messages ?? EMPTY_MESSAGES);
 
   if (!inRoom || !room) {
     return <JoinPrompt code={code} />;
@@ -70,7 +75,7 @@ export default function Room() {
 
   return (
     <div className="min-h-screen px-4 py-10">
-      <div className="mx-auto max-w-5xl">
+      <div className="mx-auto max-w-7xl">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-white">
             Listen <span className="text-brand">Together</span>
@@ -83,7 +88,7 @@ export default function Room() {
           </button>
         </div>
 
-        <div className="mt-8 grid gap-6 md:grid-cols-[320px_1fr]">
+        <div className="mt-8 grid gap-6 md:grid-cols-[300px_1fr] lg:grid-cols-[300px_1fr_320px]">
           <div className="space-y-6">
             <RoomCode code={room.code} />
             <AudioShare
@@ -129,6 +134,10 @@ export default function Room() {
                 Now playing and up next reflect the host's real Spotify queue.
               </p>
             ) : null}
+          </div>
+
+          <div className="h-[70vh] min-h-[420px] lg:h-full">
+            <ChatBox messages={messages} selfId={selfId} onSend={sendMessage} />
           </div>
         </div>
       </div>

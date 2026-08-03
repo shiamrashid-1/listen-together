@@ -1,4 +1,7 @@
-import type { NowPlaying, Participant, QueueTrack, RoomState } from "../types.js";
+import type { ChatMessage, NowPlaying, Participant, QueueTrack, RoomState } from "../types.js";
+
+const MAX_CHAT_HISTORY = 100;
+const MAX_MESSAGE_LENGTH = 500;
 
 interface Room {
   code: string;
@@ -10,6 +13,7 @@ interface Room {
   advanceTimer: NodeJS.Timeout | null;
   isSharing: boolean;
   spotifyConnected: boolean;
+  messages: ChatMessage[];
   createdAt: number;
 }
 
@@ -74,6 +78,7 @@ function toRoomState(room: Room): RoomState {
     nowPlaying: room.nowPlaying,
     isSharing: room.isSharing,
     spotifyConnected: room.spotifyConnected,
+    messages: room.messages,
   };
 }
 
@@ -88,6 +93,7 @@ export function createRoom(hostId: string, hostName: string): RoomState {
     advanceTimer: null,
     isSharing: false,
     spotifyConnected: false,
+    messages: [],
     createdAt: Date.now(),
   };
   rooms.set(code, room);
@@ -240,4 +246,30 @@ export function skipCurrent(code: string): RoomState | null {
   if (!room) return null;
   playNextInternal(room);
   return toRoomState(room);
+}
+
+/** Appends a chat message and trims history to the last MAX_CHAT_HISTORY entries. */
+export function addChatMessage(
+  code: string,
+  senderId: string,
+  senderName: string,
+  text: string
+): ChatMessage | null {
+  const room = rooms.get(code.toUpperCase());
+  if (!room) return null;
+
+  const message: ChatMessage = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    senderId,
+    senderName,
+    text: text.trim().slice(0, MAX_MESSAGE_LENGTH),
+    sentAt: Date.now(),
+  };
+
+  room.messages.push(message);
+  if (room.messages.length > MAX_CHAT_HISTORY) {
+    room.messages = room.messages.slice(-MAX_CHAT_HISTORY);
+  }
+
+  return message;
 }

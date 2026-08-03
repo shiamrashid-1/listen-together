@@ -19,6 +19,14 @@ export interface NowPlaying {
   startedAt: number;
 }
 
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  sentAt: number;
+}
+
 export interface RoomState {
   code: string;
   hostId: string;
@@ -27,6 +35,7 @@ export interface RoomState {
   nowPlaying: NowPlaying | null;
   isSharing: boolean;
   spotifyConnected: boolean;
+  messages: ChatMessage[];
 }
 
 export interface SpotifyTrackResult {

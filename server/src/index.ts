@@ -9,6 +9,7 @@ import { iceServersRouter } from "./routes/iceServers.js";
 import { registerRoomHandlers } from "./sockets/roomHandlers.js";
 import { registerSignalingHandlers } from "./sockets/signalingHandlers.js";
 import { registerQueueHandlers } from "./sockets/queueHandlers.js";
+import { registerChatHandlers } from "./sockets/chatHandlers.js";
 import { onQueueAdvance } from "./rooms/roomStore.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
@@ -39,6 +40,7 @@ io.on("connection", (socket) => {
   registerRoomHandlers(io, socket);
   registerSignalingHandlers(io, socket);
   registerQueueHandlers(io, socket);
+  registerChatHandlers(io, socket);
 });
 
 httpServer.listen(PORT, () => {
