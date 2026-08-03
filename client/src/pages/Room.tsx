@@ -136,7 +136,7 @@ export default function Room() {
             ) : null}
           </div>
 
-          <div className="h-[70vh] min-h-[420px] lg:sticky lg:top-10 lg:h-[calc(100vh-5rem)]">
+          <div className="h-[55vh] min-h-[340px] lg:sticky lg:top-10 lg:h-[60vh]">
             <ChatBox messages={messages} selfId={selfId} onSend={sendMessage} />
           </div>
         </div>
