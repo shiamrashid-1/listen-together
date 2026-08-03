@@ -9,6 +9,7 @@ import { iceServersRouter } from "./routes/iceServers.js";
 import { registerRoomHandlers } from "./sockets/roomHandlers.js";
 import { registerSignalingHandlers } from "./sockets/signalingHandlers.js";
 import { registerQueueHandlers } from "./sockets/queueHandlers.js";
+import { onQueueAdvance } from "./rooms/roomStore.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
@@ -29,6 +30,10 @@ const io = new Server(httpServer, {
 // Mounted after `io` exists because the OAuth callback needs to broadcast
 // the updated room state once the host finishes connecting Spotify.
 app.use("/api/spotify", createSpotifyAuthRouter(io));
+
+// The queue auto-advances tracks on its own timers (not in response to any
+// socket event), so it needs a way to broadcast those changes to the room.
+onQueueAdvance((state) => io.to(state.code).emit("room:state", state));
 
 io.on("connection", (socket) => {
   registerRoomHandlers(io, socket);

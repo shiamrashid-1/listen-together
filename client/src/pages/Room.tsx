@@ -7,6 +7,7 @@ import ParticipantList from "../components/ParticipantList";
 import AudioShare from "../components/AudioShare";
 import SpotifyConnect from "../components/SpotifyConnect";
 import TrackSearch from "../components/TrackSearch";
+import NowPlayingCard from "../components/NowPlayingCard";
 import Queue from "../components/Queue";
 
 export default function Room() {
@@ -69,8 +70,9 @@ export default function Room() {
           </div>
 
           <div className="space-y-6">
+            <NowPlayingCard nowPlaying={room.nowPlaying} />
             <TrackSearch />
-            <Queue queue={room.queue} nowPlayingId={room.nowPlayingId} />
+            <Queue queue={room.queue} />
           </div>
         </div>
       </div>

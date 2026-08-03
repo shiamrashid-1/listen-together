@@ -1,14 +1,52 @@
-import type { Participant, QueueTrack, RoomState } from "../types.js";
+import type { NowPlaying, Participant, QueueTrack, RoomState } from "../types.js";
 
 interface Room {
   code: string;
   hostId: string;
   participants: Map<string, Participant>;
   queue: QueueTrack[];
-  nowPlayingId: string | null;
+  nowPlaying: NowPlaying | null;
+  /** Timer that auto-advances to the next track when the current one ends. Never serialized. */
+  advanceTimer: NodeJS.Timeout | null;
   isSharing: boolean;
   spotifyConnected: boolean;
   createdAt: number;
+}
+
+type AdvanceListener = (state: RoomState) => void;
+let advanceListener: AdvanceListener | null = null;
+
+/** Registered once at server startup so the store can broadcast auto-advances without owning `io` itself. */
+export function onQueueAdvance(listener: AdvanceListener) {
+  advanceListener = listener;
+}
+
+/**
+ * (Re)schedules the timer that moves the queue forward once the currently
+ * playing track's duration has elapsed. Safe to call any time `nowPlaying`
+ * changes - clears any existing timer first.
+ */
+function scheduleAdvance(room: Room) {
+  if (room.advanceTimer) {
+    clearTimeout(room.advanceTimer);
+    room.advanceTimer = null;
+  }
+  if (!room.nowPlaying) return;
+
+  const elapsed = Date.now() - room.nowPlaying.startedAt;
+  const remaining = Math.max(0, room.nowPlaying.track.durationMs - elapsed);
+  room.advanceTimer = setTimeout(() => {
+    if (!rooms.has(room.code)) return; // room was deleted while the timer was pending
+    playNextInternal(room);
+    advanceListener?.(toRoomState(room));
+  }, remaining);
+}
+
+/** Shifts the next upcoming track (if any) into `nowPlaying` and reschedules. */
+function playNextInternal(room: Room) {
+  const next = room.queue.shift();
+  room.nowPlaying = next ? { track: next, startedAt: Date.now() } : null;
+  scheduleAdvance(room);
 }
 
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L to avoid ambiguity
@@ -33,7 +71,7 @@ function toRoomState(room: Room): RoomState {
     hostId: room.hostId,
     participants: Array.from(room.participants.values()),
     queue: room.queue,
-    nowPlayingId: room.nowPlayingId,
+    nowPlaying: room.nowPlaying,
     isSharing: room.isSharing,
     spotifyConnected: room.spotifyConnected,
   };
@@ -46,7 +84,8 @@ export function createRoom(hostId: string, hostName: string): RoomState {
     hostId,
     participants: new Map([[hostId, { id: hostId, name: hostName, isHost: true }]]),
     queue: [],
-    nowPlayingId: null,
+    nowPlaying: null,
+    advanceTimer: null,
     isSharing: false,
     spotifyConnected: false,
     createdAt: Date.now(),
@@ -88,6 +127,7 @@ export function removeParticipant(
   room.participants.delete(participantId);
 
   if (room.participants.size === 0) {
+    if (room.advanceTimer) clearTimeout(room.advanceTimer);
     rooms.delete(room.code);
     return { room: toRoomState(room), deleted: true, hostChanged: false };
   }
@@ -123,18 +163,40 @@ export function isHost(code: string, participantId: string): boolean {
   return room?.hostId === participantId;
 }
 
+/**
+ * Adds a track to the upcoming queue. If nothing is currently playing (the
+ * room was idle), the new track starts playing immediately instead of
+ * sitting in an empty queue.
+ */
 export function addQueueTrack(code: string, track: Omit<QueueTrack, "id">): RoomState | null {
   const room = rooms.get(code.toUpperCase());
   if (!room) return null;
-  room.queue.push({ ...track, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` });
+  const newTrack: QueueTrack = { ...track, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` };
+
+  if (!room.nowPlaying) {
+    room.nowPlaying = { track: newTrack, startedAt: Date.now() };
+    scheduleAdvance(room);
+  } else {
+    room.queue.push(newTrack);
+  }
+
   return toRoomState(room);
 }
 
+/**
+ * Removes a track. Removing the currently playing track skips to whatever's
+ * next, same as if it had finished naturally.
+ */
 export function removeQueueTrack(code: string, trackId: string): RoomState | null {
   const room = rooms.get(code.toUpperCase());
   if (!room) return null;
-  room.queue = room.queue.filter((t) => t.id !== trackId);
-  if (room.nowPlayingId === trackId) room.nowPlayingId = null;
+
+  if (room.nowPlaying?.track.id === trackId) {
+    playNextInternal(room);
+  } else {
+    room.queue = room.queue.filter((t) => t.id !== trackId);
+  }
+
   return toRoomState(room);
 }
 
@@ -149,9 +211,33 @@ export function reorderQueue(code: string, orderedIds: string[]): RoomState | nu
   return toRoomState(room);
 }
 
-export function setNowPlaying(code: string, trackId: string | null): RoomState | null {
+/**
+ * Jumps straight to a specific track, wherever it currently sits (upcoming
+ * queue, or already playing - which just restarts its progress). Everything
+ * else keeps its relative order.
+ */
+export function playNow(code: string, trackId: string): RoomState | null {
   const room = rooms.get(code.toUpperCase());
   if (!room) return null;
-  room.nowPlayingId = trackId;
+
+  let track: QueueTrack | undefined;
+  const idx = room.queue.findIndex((t) => t.id === trackId);
+  if (idx !== -1) {
+    track = room.queue.splice(idx, 1)[0];
+  } else if (room.nowPlaying?.track.id === trackId) {
+    track = room.nowPlaying.track;
+  }
+  if (!track) return toRoomState(room);
+
+  room.nowPlaying = { track, startedAt: Date.now() };
+  scheduleAdvance(room);
+  return toRoomState(room);
+}
+
+/** Skips whatever's currently playing and advances to the next upcoming track (or idle, if none). */
+export function skipCurrent(code: string): RoomState | null {
+  const room = rooms.get(code.toUpperCase());
+  if (!room) return null;
+  playNextInternal(room);
   return toRoomState(room);
 }

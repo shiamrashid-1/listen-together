@@ -14,12 +14,17 @@ export interface QueueTrack {
   addedBy: string;
 }
 
+export interface NowPlaying {
+  track: QueueTrack;
+  startedAt: number;
+}
+
 export interface RoomState {
   code: string;
   hostId: string;
   participants: Participant[];
   queue: QueueTrack[];
-  nowPlayingId: string | null;
+  nowPlaying: NowPlaying | null;
   isSharing: boolean;
   spotifyConnected: boolean;
 }

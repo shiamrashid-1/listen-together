@@ -51,10 +51,17 @@ export function registerQueueHandlers(io: Server, socket: Socket) {
     if (room) io.to(code).emit("room:state", room);
   });
 
-  socket.on("queue:mark-playing", ({ trackId }: { trackId: string | null }) => {
+  socket.on("queue:play-now", ({ trackId }: { trackId: string }) => {
     const code = socket.data.roomCode as string | undefined;
     if (!code) return;
-    const room = roomStore.setNowPlaying(code, trackId);
+    const room = roomStore.playNow(code, trackId);
+    if (room) io.to(code).emit("room:state", room);
+  });
+
+  socket.on("queue:skip", () => {
+    const code = socket.data.roomCode as string | undefined;
+    if (!code) return;
+    const room = roomStore.skipCurrent(code);
     if (room) io.to(code).emit("room:state", room);
   });
 }

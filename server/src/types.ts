@@ -14,12 +14,19 @@ export interface QueueTrack {
   addedBy: string;
 }
 
+export interface NowPlaying {
+  track: QueueTrack;
+  /** epoch ms when this track started playing - clients derive live progress from this. */
+  startedAt: number;
+}
+
 export interface RoomState {
   code: string;
   hostId: string;
   participants: Participant[];
+  /** Upcoming tracks only - the currently playing track lives in `nowPlaying`, not here. */
   queue: QueueTrack[];
-  nowPlayingId: string | null;
+  nowPlaying: NowPlaying | null;
   isSharing: boolean;
   spotifyConnected: boolean;
 }
