@@ -11,6 +11,15 @@ interface HostTokens {
 // cleared explicitly when the host changes or the room is deleted.
 const tokensByRoom = new Map<string, HostTokens>();
 
+// Both the playback poller (every 4s) and any queue:add can call
+// getValidAccessToken around the same time. Without de-duping, two
+// concurrent calls could both see a near-expired token and both fire a
+// refresh - and if Spotify happens to rotate/invalidate the refresh token
+// on use, the second (losing) request fails with invalid_grant, which used
+// to wipe out a perfectly good connection. Tracking the in-flight refresh
+// per room means every concurrent caller awaits the *same* attempt instead.
+const refreshesInFlight = new Map<string, Promise<string | null>>();
+
 export function set(code: string, accessToken: string, refreshToken: string, expiresInSeconds: number) {
   tokensByRoom.set(code.toUpperCase(), {
     accessToken,
@@ -34,25 +43,36 @@ export function isConnected(code: string): boolean {
  * stored tokens are dropped so the UI can prompt to reconnect).
  */
 export async function getValidAccessToken(code: string): Promise<string | null> {
-  const entry = tokensByRoom.get(code.toUpperCase());
+  const upperCode = code.toUpperCase();
+  const entry = tokensByRoom.get(upperCode);
   if (!entry) return null;
 
   if (entry.expiresAt > Date.now() + 5000) {
     return entry.accessToken;
   }
 
-  try {
-    const refreshed = await refreshAccessToken(entry.refreshToken);
-    const nextEntry: HostTokens = {
-      accessToken: refreshed.accessToken,
-      // Spotify doesn't always return a new refresh token; keep the old one if so.
-      refreshToken: refreshed.refreshToken ?? entry.refreshToken,
-      expiresAt: Date.now() + refreshed.expiresIn * 1000,
-    };
-    tokensByRoom.set(code.toUpperCase(), nextEntry);
-    return nextEntry.accessToken;
-  } catch {
-    tokensByRoom.delete(code.toUpperCase());
-    return null;
-  }
+  const existingRefresh = refreshesInFlight.get(upperCode);
+  if (existingRefresh) return existingRefresh;
+
+  const refreshPromise = (async () => {
+    try {
+      const refreshed = await refreshAccessToken(entry.refreshToken);
+      const nextEntry: HostTokens = {
+        accessToken: refreshed.accessToken,
+        // Spotify doesn't always return a new refresh token; keep the old one if so.
+        refreshToken: refreshed.refreshToken ?? entry.refreshToken,
+        expiresAt: Date.now() + refreshed.expiresIn * 1000,
+      };
+      tokensByRoom.set(upperCode, nextEntry);
+      return nextEntry.accessToken;
+    } catch {
+      tokensByRoom.delete(upperCode);
+      return null;
+    } finally {
+      refreshesInFlight.delete(upperCode);
+    }
+  })();
+
+  refreshesInFlight.set(upperCode, refreshPromise);
+  return refreshPromise;
 }

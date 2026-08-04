@@ -50,7 +50,14 @@ export function startPolling(code: string, io: Server) {
   const tick = async () => {
     const accessToken = await tokenStore.getValidAccessToken(upperCode);
     if (!accessToken) {
+      // The host's Spotify connection is genuinely dead (they revoked
+      // access, or the refresh token stopped working) - stop polling and
+      // flip the room back to "not connected" so the UI falls back to the
+      // in-app simulated queue instead of being stuck showing a blank
+      // now-playing/queue forever.
       stopPolling(upperCode);
+      const updated = roomStore.setSpotifyConnected(upperCode, false);
+      if (updated) io.to(upperCode).emit("room:state", updated);
       io.to(upperCode).emit("spotify:playback", { nowPlaying: null, queue: [] } satisfies SpotifyPlaybackBroadcast);
       return;
     }
