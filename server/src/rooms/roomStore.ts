@@ -15,6 +15,26 @@ interface Room {
   spotifyConnected: boolean;
   messages: ChatMessage[];
   createdAt: number;
+  /** Participant IDs who've voted to skip whatever's in `nowPlaying`. Cleared whenever it changes. */
+  skipVotes: Set<string>;
+  /**
+   * FIFO-per-URI log of who queued what through our app, used to attribute
+   * tracks in the host's *real* Spotify queue (which has no concept of "who
+   * added this") - see `recordSpotifyAttribution`/`matchSpotifyAttribution`.
+   * Capped so a long-lived room doesn't grow this unboundedly.
+   */
+  spotifyAttribution: Array<{ uri: string; name: string }>;
+}
+
+const MAX_SPOTIFY_ATTRIBUTION_ENTRIES = 200;
+
+/** Strict majority of the current room, minimum 1 - used as the vote-skip threshold. */
+function computeSkipVotesRequired(participantCount: number): number {
+  return Math.max(1, Math.floor(participantCount / 2) + 1);
+}
+
+function clearSkipVotes(room: Room) {
+  room.skipVotes.clear();
 }
 
 type AdvanceListener = (state: RoomState) => void;
@@ -51,6 +71,7 @@ function playNextInternal(room: Room) {
   const next = room.queue.shift();
   room.nowPlaying = next ? { track: next, startedAt: Date.now() } : null;
   scheduleAdvance(room);
+  clearSkipVotes(room);
 }
 
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L to avoid ambiguity
@@ -79,6 +100,8 @@ function toRoomState(room: Room): RoomState {
     isSharing: room.isSharing,
     spotifyConnected: room.spotifyConnected,
     messages: room.messages,
+    skipVoterIds: Array.from(room.skipVotes),
+    skipVotesRequired: computeSkipVotesRequired(room.participants.size),
   };
 }
 
@@ -95,6 +118,8 @@ export function createRoom(hostId: string, hostName: string): RoomState {
     spotifyConnected: false,
     messages: [],
     createdAt: Date.now(),
+    skipVotes: new Set(),
+    spotifyAttribution: [],
   };
   rooms.set(code, room);
   return toRoomState(room);
@@ -131,6 +156,7 @@ export function removeParticipant(
   if (!room) return null;
 
   room.participants.delete(participantId);
+  room.skipVotes.delete(participantId);
 
   if (room.participants.size === 0) {
     if (room.advanceTimer) clearTimeout(room.advanceTimer);
@@ -182,6 +208,7 @@ export function addQueueTrack(code: string, track: Omit<QueueTrack, "id">): Room
   if (!room.nowPlaying) {
     room.nowPlaying = { track: newTrack, startedAt: Date.now() };
     scheduleAdvance(room);
+    clearSkipVotes(room);
   } else {
     room.queue.push(newTrack);
   }
@@ -237,6 +264,7 @@ export function playNow(code: string, trackId: string): RoomState | null {
 
   room.nowPlaying = { track, startedAt: Date.now() };
   scheduleAdvance(room);
+  clearSkipVotes(room);
   return toRoomState(room);
 }
 
@@ -246,6 +274,48 @@ export function skipCurrent(code: string): RoomState | null {
   if (!room) return null;
   playNextInternal(room);
   return toRoomState(room);
+}
+
+/**
+ * Toggles `participantId`'s vote to skip whatever's currently playing.
+ * `shouldSkip` tells the caller whether this vote just crossed the required
+ * threshold - the caller is responsible for actually performing the skip
+ * (which may also need to hit the Spotify API), since that's async and
+ * roomStore stays synchronous.
+ */
+export function voteSkip(code: string, participantId: string): { state: RoomState; shouldSkip: boolean } | null {
+  const room = rooms.get(code.toUpperCase());
+  if (!room) return null;
+
+  if (room.skipVotes.has(participantId)) {
+    room.skipVotes.delete(participantId);
+  } else {
+    room.skipVotes.add(participantId);
+  }
+
+  const shouldSkip =
+    room.nowPlaying !== null && room.skipVotes.size >= computeSkipVotesRequired(room.participants.size);
+  return { state: toRoomState(room), shouldSkip };
+}
+
+/**
+ * Records that `name` queued `uri` through our app, so it can later be
+ * matched up against the host's real Spotify queue (which has no built-in
+ * concept of who added a track). See `matchSpotifyAttribution`.
+ */
+export function recordSpotifyAttribution(code: string, uri: string, name: string): void {
+  const room = rooms.get(code.toUpperCase());
+  if (!room) return;
+  room.spotifyAttribution.push({ uri, name });
+  if (room.spotifyAttribution.length > MAX_SPOTIFY_ATTRIBUTION_ENTRIES) {
+    room.spotifyAttribution.splice(0, room.spotifyAttribution.length - MAX_SPOTIFY_ATTRIBUTION_ENTRIES);
+  }
+}
+
+/** Returns a copy of the room's queue-attribution log (see `recordSpotifyAttribution`). */
+export function getSpotifyAttribution(code: string): Array<{ uri: string; name: string }> {
+  const room = rooms.get(code.toUpperCase());
+  return room ? [...room.spotifyAttribution] : [];
 }
 
 /** Appends a chat message and trims history to the last MAX_CHAT_HISTORY entries. */

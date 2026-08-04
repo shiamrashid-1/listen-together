@@ -40,6 +40,39 @@ const WEBRTC_FALLBACK_TIMEOUT_MS = 8000;
 const RECORDER_CHUNK_INTERVAL_MS = 500;
 
 /**
+ * Caps how many direct WebRTC connections the host opens at once. Each mesh
+ * connection is a separate ~96kbps Opus upload from the host's single
+ * connection (plus its own DTLS/SRTP/ICE/RTCP overhead) - past a handful of
+ * simultaneous connections, that easily saturates a typical home uplink,
+ * causing packet loss/jitter across *every* connection at once (audio
+ * stuttering for everyone, not just the newest listeners). 8 * ~96kbps is
+ * comfortably under typical home upload bandwidth. Listeners beyond this
+ * cap use the server relay instead (see LiveAudioPlayer below) - its
+ * fan-out cost is paid by the server's bandwidth, not the host's.
+ */
+const MAX_MESH_LISTENERS = 8;
+
+/**
+ * Returns the IDs of participants who should get a direct WebRTC connection
+ * from the host, in join order (host excluded). Both the host and every
+ * listener compute this independently from the same `participants` array,
+ * so no extra signaling is needed to agree on who's "in the mesh."
+ *
+ * Join order is stable and only ever improves a listener's rank (moving up
+ * if someone ahead of them leaves) - new joiners are always appended, so
+ * nobody already meshed ever gets bumped down to the relay just because the
+ * room grew.
+ */
+function getMeshEligibleIds(participants: Participant[]): Set<string> {
+  return new Set(
+    participants
+      .filter((p) => !p.isHost)
+      .slice(0, MAX_MESH_LISTENERS)
+      .map((p) => p.id)
+  );
+}
+
+/**
  * Chrome negotiates mono, modest-bitrate Opus by default, which is tuned for
  * voice calls, not music. This rewrites the offer's Opus fmtp line to request
  * stereo and a somewhat higher bitrate for better music fidelity.
@@ -199,6 +232,8 @@ interface UseAudioMeshOptions {
   isHost: boolean;
   participants: Participant[];
   selfId: string | null;
+  /** Whether the host currently has audio sharing turned on for this room. */
+  roomIsSharing: boolean;
 }
 
 /**
@@ -213,12 +248,13 @@ interface UseAudioMeshOptions {
  * connection already carrying room state/chat/signaling, so it keeps
  * working even on networks that block dedicated streaming HTTP connections.
  */
-export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptions) {
+export function useAudioMesh({ isHost, participants, selfId, roomIsSharing }: UseAudioMeshOptions) {
   const [isSharing, setIsSharing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [fallbackActive, setFallbackActive] = useState(false);
   const [fallbackNeedsResume, setFallbackNeedsResume] = useState(false);
+  const [fallbackReason, setFallbackReason] = useState<"network" | "capacity" | null>(null);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -231,6 +267,34 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
       () => setFallbackNeedsResume(false),
       () => setFallbackNeedsResume(true)
     );
+  }, []);
+
+  // Lifted out of the offer-handling effect so both the "WebRTC didn't
+  // connect in time" path and the "we're outside the mesh cap, don't even
+  // wait for an offer" path can share the same activation/teardown logic.
+  const activateFallback = useCallback((reason: "network" | "capacity") => {
+    if (fallbackSubscribedRef.current) {
+      setFallbackReason(reason);
+      return;
+    }
+    fallbackSubscribedRef.current = true;
+    console.warn(`[audio] falling back to socket-relayed audio stream (reason: ${reason})`);
+    const player = fallbackPlayerRef.current ?? new LiveAudioPlayer();
+    fallbackPlayerRef.current = player;
+    player.resume().catch(() => {});
+    setFallbackNeedsResume(player.needsResume);
+    socket.emit("audio:relay-subscribe");
+    setFallbackActive(true);
+    setFallbackReason(reason);
+  }, []);
+
+  const deactivateFallback = useCallback(() => {
+    if (!fallbackSubscribedRef.current) return;
+    fallbackSubscribedRef.current = false;
+    socket.emit("audio:relay-unsubscribe");
+    setFallbackActive(false);
+    setFallbackNeedsResume(false);
+    setFallbackReason(null);
   }, []);
 
   const closePeer = useCallback((peerId: string) => {
@@ -346,8 +410,11 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
         stopSharing();
       });
 
+      const meshEligibleIds = getMeshEligibleIds(participants);
       await Promise.all(
-        participants.filter((p) => p.id !== selfId).map((p) => connectToListener(p.id))
+        participants
+          .filter((p) => p.id !== selfId && meshEligibleIds.has(p.id))
+          .map((p) => connectToListener(p.id))
       );
 
       startRecordingForFallback(stream);
@@ -373,42 +440,39 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
     socket.emit("audio:sharing-stopped");
   }, [closeAllPeers, stopRecordingForFallback]);
 
-  // Host: connect to any listener that joins after sharing has already started.
+  // Host: connect to any mesh-eligible listener that joins (or becomes
+  // eligible, e.g. a slot freed up) after sharing has already started.
   useEffect(() => {
     if (!isHost || !isSharing) return;
+    const meshEligibleIds = getMeshEligibleIds(participants);
     participants
-      .filter((p) => p.id !== selfId && !peersRef.current.has(p.id))
+      .filter((p) => p.id !== selfId && meshEligibleIds.has(p.id) && !peersRef.current.has(p.id))
       .forEach((p) => connectToListener(p.id));
 
+    // Close peers that left the room entirely, or fell outside the current
+    // participant set (cap changes don't demote anyone already meshed).
     const currentIds = new Set(participants.map((p) => p.id));
     peersRef.current.forEach((_pc, peerId) => {
       if (!currentIds.has(peerId)) closePeer(peerId);
     });
   }, [isHost, isSharing, participants, selfId, connectToListener, closePeer]);
 
+  // Listener side: if we're outside the mesh cap, no offer is ever coming
+  // for us - go straight to the relay instead of waiting around for one.
+  // Recomputed whenever the participant list or sharing state changes (e.g.
+  // a slot frees up ahead of us, or sharing stops entirely).
+  useEffect(() => {
+    if (isHost || !selfId) return;
+    if (!roomIsSharing) {
+      deactivateFallback();
+      return;
+    }
+    if (!getMeshEligibleIds(participants).has(selfId)) activateFallback("capacity");
+  }, [isHost, selfId, roomIsSharing, participants, activateFallback, deactivateFallback]);
+
   // Listener side: respond to offers from the host, relay ICE candidates.
   useEffect(() => {
     if (isHost) return;
-
-    const activateFallback = () => {
-      if (fallbackSubscribedRef.current) return;
-      fallbackSubscribedRef.current = true;
-      console.warn("[audio] WebRTC unavailable - falling back to socket-relayed audio stream");
-      const player = fallbackPlayerRef.current ?? new LiveAudioPlayer();
-      fallbackPlayerRef.current = player;
-      player.resume().catch(() => {});
-      setFallbackNeedsResume(player.needsResume);
-      socket.emit("audio:relay-subscribe");
-      setFallbackActive(true);
-    };
-
-    const deactivateFallback = () => {
-      if (!fallbackSubscribedRef.current) return;
-      fallbackSubscribedRef.current = false;
-      socket.emit("audio:relay-unsubscribe");
-      setFallbackActive(false);
-      setFallbackNeedsResume(false);
-    };
 
     const handleOffer = async ({ from, sdp }: { from: string; sdp: RTCSessionDescriptionInit }) => {
       closePeer(from);
@@ -419,7 +483,7 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
 
       const label = `listener<-${from.slice(0, 6)}`;
       const fallbackTimer = setTimeout(() => {
-        if (peersRef.current.get(from) === pc && pc.connectionState !== "connected") activateFallback();
+        if (peersRef.current.get(from) === pc && pc.connectionState !== "connected") activateFallback("network");
       }, WEBRTC_FALLBACK_TIMEOUT_MS);
 
       logConnectionDiagnostics(pc, label, () => {
@@ -427,7 +491,7 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
           clearTimeout(fallbackTimer);
           deactivateFallback(); // WebRTC came through after all - drop the fallback
         }
-        if (pc.connectionState === "failed" && peersRef.current.get(from) === pc) activateFallback();
+        if (pc.connectionState === "failed" && peersRef.current.get(from) === pc) activateFallback("network");
         if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
           setRemoteStream((prev) => (peersRef.current.get(from) === pc ? null : prev));
         }
@@ -466,7 +530,7 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
       socket.off("webrtc:ice-candidate", handleIceCandidate);
       socket.off("audio:relay-chunk", handleRelayChunk);
     };
-  }, [isHost, closePeer]);
+  }, [isHost, closePeer, activateFallback, deactivateFallback]);
 
   // Host side: receive answers and ICE candidates from listeners.
   useEffect(() => {
@@ -507,6 +571,7 @@ export function useAudioMesh({ isHost, participants, selfId }: UseAudioMeshOptio
     remoteStream,
     fallbackActive,
     fallbackNeedsResume,
+    fallbackReason,
     resumeFallbackAudio,
     startSharing,
     stopSharing,

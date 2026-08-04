@@ -3,6 +3,7 @@ import * as roomStore from "../rooms/roomStore.js";
 import * as tokenStore from "../spotify/tokenStore.js";
 import * as playbackPoller from "../spotify/playbackPoller.js";
 import * as audioRelay from "../audio/audioRelay.js";
+import { performSkip } from "./queueHandlers.js";
 
 export function registerRoomHandlers(io: Server, socket: Socket) {
   socket.on("room:create", ({ name }: { name: string }, callback: (res: { ok: true; room: ReturnType<typeof roomStore.createRoom> } | { ok: false; error: string }) => void) => {
@@ -57,5 +58,11 @@ export function registerRoomHandlers(io: Server, socket: Socket) {
     }
 
     io.to(result.room.code).emit("room:state", result.room);
+
+    // The vote threshold shrinks as people leave, so a departure can push
+    // already-cast votes over the line without anyone casting a new one.
+    if (result.room.nowPlaying && result.room.skipVoterIds.length >= result.room.skipVotesRequired) {
+      void performSkip(result.room.code, io);
+    }
   });
 }

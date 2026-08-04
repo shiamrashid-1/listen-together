@@ -182,6 +182,7 @@ export async function queueTrackForUser(accessToken: string, uri: string): Promi
 // --- Reading real playback state (for the Now Playing / Up Next display) ---
 
 export interface SpotifyPlaybackTrack {
+  uri: string;
   name: string;
   artists: string;
   albumArt: string | null;
@@ -195,6 +196,7 @@ export interface CurrentPlayback {
 }
 
 interface RawSpotifyTrack {
+  uri: string;
   name: string;
   artists: Array<{ name: string }>;
   album: { images: Array<{ url: string }> };
@@ -203,6 +205,7 @@ interface RawSpotifyTrack {
 
 function mapRawTrack(item: RawSpotifyTrack): SpotifyPlaybackTrack {
   return {
+    uri: item.uri,
     name: item.name,
     artists: item.artists.map((a) => a.name).join(", "),
     albumArt: item.album.images[0]?.url ?? null,
@@ -241,4 +244,18 @@ export async function getUpcomingQueue(accessToken: string): Promise<SpotifyPlay
 
   const data = (await response.json()) as { queue: RawSpotifyTrack[] };
   return (data.queue ?? []).slice(0, 15).map(mapRawTrack);
+}
+
+export type SkipResult = { ok: true } | { ok: false; error: "no_active_device" | "unknown" };
+
+/** Skips to the next track on the host's actual Spotify playback session. */
+export async function skipToNext(accessToken: string): Promise<SkipResult> {
+  const response = await fetch("https://api.spotify.com/v1/me/player/next", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (response.status === 204 || response.ok) return { ok: true };
+  if (response.status === 404) return { ok: false, error: "no_active_device" };
+  return { ok: false, error: "unknown" };
 }

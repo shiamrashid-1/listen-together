@@ -34,14 +34,27 @@ function useElapsedMs(playback: PlaybackInfo | null): number {
 
 interface NowPlayingCardProps {
   playback: PlaybackInfo | null;
-  /** Hide the skip control when displaying real Spotify state (we don't control transport). */
-  showSkip: boolean;
+  isHost: boolean;
+  selfId: string | null;
+  /** Participant IDs who've voted to skip the current track. */
+  skipVoterIds: string[];
+  /** How many votes are needed to skip, given the current room size. */
+  skipVotesRequired: number;
   emptyMessage?: string;
 }
 
-export default function NowPlayingCard({ playback, showSkip, emptyMessage }: NowPlayingCardProps) {
+export default function NowPlayingCard({
+  playback,
+  isHost,
+  selfId,
+  skipVoterIds,
+  skipVotesRequired,
+  emptyMessage,
+}: NowPlayingCardProps) {
   const elapsed = useElapsedMs(playback);
   const skip = () => socket.emit("queue:skip");
+  const voteSkip = () => socket.emit("queue:vote-skip");
+  const hasVoted = Boolean(selfId && skipVoterIds.includes(selfId));
 
   if (!playback) {
     return (
@@ -73,7 +86,7 @@ export default function NowPlayingCard({ playback, showSkip, emptyMessage }: Now
           {track.addedBy ? <p className="mt-1 truncate text-xs text-white/40">added by {track.addedBy}</p> : null}
           {!playback.isPlaying ? <p className="mt-1 truncate text-xs text-amber-400/80">Paused on Spotify</p> : null}
         </div>
-        {showSkip ? (
+        {isHost ? (
           <button
             onClick={skip}
             title="Skip"
@@ -81,7 +94,19 @@ export default function NowPlayingCard({ playback, showSkip, emptyMessage }: Now
           >
             Skip ▸
           </button>
-        ) : null}
+        ) : (
+          <button
+            onClick={voteSkip}
+            title={hasVoted ? "Remove your vote to skip" : "Vote to skip this track"}
+            className={`flex-shrink-0 rounded-lg border px-3 py-2 text-xs font-semibold transition ${
+              hasVoted
+                ? "border-amber-400/50 bg-amber-400/10 text-amber-300 hover:bg-amber-400/20"
+                : "border-white/10 text-white/70 hover:bg-white/10 hover:text-white"
+            }`}
+          >
+            {hasVoted ? "Voted ✓" : "Vote skip"} ({skipVoterIds.length}/{skipVotesRequired})
+          </button>
+        )}
       </div>
 
       <div className="mt-4">

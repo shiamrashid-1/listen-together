@@ -6,6 +6,7 @@ A very basic web app for listening to Spotify with friends in real time:
 - Friends join from their browser using that code.
 - The host shares their Spotify tab's audio (via `getDisplayMedia`) and it's relayed live to everyone else in the room over WebRTC — audio only, no video, no screen visuals.
 - Anyone in the room can search Spotify's catalog and add songs to a shared queue. If the host connects their Spotify account, added songs also get pushed live onto the host's real Spotify queue.
+- Every queued track shows who added it. The host can skip instantly; everyone else can vote to skip, and the track is skipped once a majority of the room has voted.
 
 ## How audio sharing works (and its limits)
 
@@ -155,5 +156,5 @@ Spotify tokens are stored in-memory per room (matching the rest of the app's eph
 ## Notes / future ideas
 
 - Rooms are ephemeral and stored in memory only — restarting the server clears all rooms (including any connected Spotify session).
-- Audio relay uses a simple WebRTC mesh (host connects directly to each listener), which is fine for small groups of friends but won't scale to large rooms. A future upgrade would move to an SFU (e.g. mediasoup, LiveKit).
+- Audio relay uses a WebRTC mesh (host connects directly to each listener) capped at `MAX_MESH_LISTENERS` (8, in `client/src/hooks/useAudioMesh.ts`) direct connections — each one is a separate upload from the host's browser, and too many at once saturates a typical home uplink and makes audio stutter for everyone. Listeners beyond that cap are automatically routed to the server-side relay (the same one used for the network-fallback case) instead of getting a WebRTC offer at all, so medium-sized rooms (10-30 people) stay stable without capping the room size itself. This isn't a full fix for very large rooms, since the relay is a single ffmpeg process per room — a future upgrade would move to a proper SFU (e.g. mediasoup, LiveKit) for the meshed tier too.
 - The HTTP fallback stream routes audio through the server (unlike WebRTC's peer-to-peer path), so it counts against server bandwidth and adds an `ffmpeg` process per actively-sharing room. Fine for casual/personal-scale use; a lot of concurrent rooms relying on the fallback at once could strain Render's free tier.

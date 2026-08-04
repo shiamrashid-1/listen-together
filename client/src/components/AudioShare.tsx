@@ -9,6 +9,7 @@ interface AudioShareProps {
   remoteStream: MediaStream | null;
   fallbackActive: boolean;
   fallbackNeedsResume: boolean;
+  fallbackReason: "network" | "capacity" | null;
   resumeFallbackAudio: () => void;
   startSharing: () => void;
   stopSharing: () => void;
@@ -22,6 +23,7 @@ export default function AudioShare({
   remoteStream,
   fallbackActive,
   fallbackNeedsResume,
+  fallbackReason,
   resumeFallbackAudio,
   startSharing,
   stopSharing,
@@ -124,8 +126,9 @@ export default function AudioShare({
                 Listening (backup stream)
               </p>
               <p className="text-xs text-white/50">
-                Your network is blocking the direct connection, so audio is running a few seconds
-                behind live.
+                {fallbackReason === "capacity"
+                  ? "This room is at capacity for direct connections, so audio is running a few seconds behind live."
+                  : "Your network is blocking the direct connection, so audio is running a few seconds behind live."}
               </p>
             </div>
           )

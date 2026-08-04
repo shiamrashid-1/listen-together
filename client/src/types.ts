@@ -36,6 +36,8 @@ export interface RoomState {
   isSharing: boolean;
   spotifyConnected: boolean;
   messages: ChatMessage[];
+  skipVoterIds: string[];
+  skipVotesRequired: number;
 }
 
 export interface SpotifyTrackResult {
@@ -52,6 +54,8 @@ export interface SpotifyPlaybackTrack {
   artists: string;
   albumArt: string | null;
   durationMs: number;
+  /** Who added this via our app's queue, if we were able to match it up - unset if it was queued directly in Spotify. */
+  addedBy?: string;
 }
 
 export interface SpotifyPlaybackState {

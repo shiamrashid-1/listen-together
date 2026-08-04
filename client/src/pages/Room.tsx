@@ -27,6 +27,7 @@ export default function Room() {
     isHost,
     participants: inRoom && room ? room.participants : [],
     selfId,
+    roomIsSharing: Boolean(room?.isSharing),
   });
   const spotifyPlayback = useSpotifyPlayback(Boolean(room?.spotifyConnected));
   const { messages, sendMessage } = useChat(room?.messages ?? EMPTY_MESSAGES);
@@ -99,6 +100,7 @@ export default function Room() {
               remoteStream={audioMesh.remoteStream}
               fallbackActive={audioMesh.fallbackActive}
               fallbackNeedsResume={audioMesh.fallbackNeedsResume}
+              fallbackReason={audioMesh.fallbackReason}
               resumeFallbackAudio={audioMesh.resumeFallbackAudio}
               startSharing={audioMesh.startSharing}
               stopSharing={audioMesh.stopSharing}
@@ -115,7 +117,10 @@ export default function Room() {
           <div className="space-y-6">
             <NowPlayingCard
               playback={nowPlayingInfo}
-              showSkip={!usingRealSpotify}
+              isHost={isHost}
+              selfId={selfId}
+              skipVoterIds={room.skipVoterIds}
+              skipVotesRequired={room.skipVotesRequired}
               emptyMessage={
                 usingRealSpotify
                   ? "Nothing playing on Spotify right now."
