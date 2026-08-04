@@ -3,12 +3,6 @@ import { SERVER_URL, socket } from "../lib/socket";
 import { formatDuration } from "../lib/format";
 import type { SpotifyTrackResult } from "../types";
 
-const SPOTIFY_ERROR_MESSAGES: Record<string, string> = {
-  premium_required: "Added to queue, but auto-queueing on Spotify needs Premium.",
-  no_active_device: "Added to queue, but no Spotify device is open anywhere - open the Spotify app (desktop, mobile, or web) and try again.",
-  unknown: "Added to queue, but Spotify auto-queue failed.",
-};
-
 export default function TrackSearch() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SpotifyTrackResult[]>([]);
@@ -61,13 +55,13 @@ export default function TrackSearch() {
       (res: { ok: true; pushedToSpotify: boolean; spotifyError?: string } | { ok: false; error: string }) => {
         if (!res.ok) {
           showStatus(track.uri, res.error);
-        } else if (res.pushedToSpotify) {
-          showStatus(track.uri, "Added and queued live on Spotify.");
-        } else if (res.spotifyError) {
-          showStatus(track.uri, SPOTIFY_ERROR_MESSAGES[res.spotifyError] ?? SPOTIFY_ERROR_MESSAGES.unknown);
-        } else {
-          showStatus(track.uri, "Added to queue.");
+          return;
         }
+        // Whether it also landed live on Spotify is best-effort and mostly
+        // out of our hands (Spotify's own device-visibility API is flaky
+        // even when everything's set up correctly) - so it's not worth
+        // surfacing as an error. Adding to the room's queue always works.
+        showStatus(track.uri, res.pushedToSpotify ? "Added and queued live on Spotify." : "Added to queue.");
       }
     );
   };
