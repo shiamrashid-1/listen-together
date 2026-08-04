@@ -72,12 +72,15 @@ export function startPolling(code: string, io: Server) {
     let queue: SpotifyPlaybackTrack[];
     try {
       [playback, queue] = await Promise.all([getCurrentPlayback(accessToken), getUpcomingQueue(accessToken)]);
-    } catch {
+    } catch (err) {
       // Couldn't reach Spotify at all this round (rate limit, transient
       // 5xx, network blip) - don't broadcast a false-empty state over
       // what's likely still a perfectly good display. Just retry next tick.
+      console.warn(`[spotify-poll:${upperCode}] fetch failed this tick, skipping broadcast:`, err);
       return;
     }
+
+    if (!playback) console.log(`[spotify-poll:${upperCode}] Spotify reports nothing currently playing for this account`);
 
     const liveTracks = playback ? [playback.track, ...queue] : queue;
     const attribution = roomStore.getSpotifyAttribution(upperCode);

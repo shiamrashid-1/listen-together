@@ -147,6 +147,22 @@ export class SpotifyRefreshError extends Error {
   }
 }
 
+export interface SpotifyProfile {
+  id: string;
+  displayName: string;
+  product: string;
+}
+
+/** Fetches the basic profile of whoever this access token belongs to - used to confirm which account actually got connected. */
+export async function getCurrentUserProfile(accessToken: string): Promise<SpotifyProfile | null> {
+  const response = await fetch("https://api.spotify.com/v1/me", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) return null;
+  const data = (await response.json()) as { id: string; display_name: string | null; product: string };
+  return { id: data.id, displayName: data.display_name ?? data.id, product: data.product };
+}
+
 export async function refreshAccessToken(refreshToken: string): Promise<HostTokenResult> {
   const { clientId, clientSecret } = getCredentials();
 

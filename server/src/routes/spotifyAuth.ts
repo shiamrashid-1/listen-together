@@ -3,7 +3,7 @@ import type { Server } from "socket.io";
 import * as roomStore from "../rooms/roomStore.js";
 import * as tokenStore from "../spotify/tokenStore.js";
 import * as playbackPoller from "../spotify/playbackPoller.js";
-import { exchangeCodeForTokens, getAuthorizeUrl } from "../spotify/spotifyClient.js";
+import { exchangeCodeForTokens, getAuthorizeUrl, getCurrentUserProfile } from "../spotify/spotifyClient.js";
 
 function htmlPage(title: string, message: string, autoClose: boolean) {
   return `<!doctype html>
@@ -99,7 +99,14 @@ export function createSpotifyAuthRouter(io: Server): Router {
         playbackPoller.startPolling(updated.code, io);
       }
 
-      res.send(htmlPage("Connected!", "Spotify is connected. You can close this window.", true));
+      // Surfacing exactly which account got linked makes it obvious if the
+      // wrong one was picked (e.g. a different Spotify session than the one
+      // actually playing music), which otherwise just looks like a mysterious
+      // "no active device" failure with no way to tell why.
+      const profile = await getCurrentUserProfile(tokens.accessToken);
+      console.log(`[spotify-auth] connected room ${state} to Spotify account:`, profile);
+      const who = profile ? `Connected as <strong>${profile.displayName}</strong> (${profile.product}).` : "Spotify is connected.";
+      res.send(htmlPage("Connected!", `${who} You can close this window.`, true));
     } catch (err) {
       console.error("[spotify-auth] token exchange failed:", err);
       res.status(502).send(htmlPage("Connection failed", "Couldn't finish connecting to Spotify. Please try again.", false));
