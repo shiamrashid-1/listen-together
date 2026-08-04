@@ -36,20 +36,24 @@ export default function Room() {
     return <JoinPrompt code={code} />;
   }
 
-  // When the host has connected Spotify, real playback state (from Spotify
-  // itself) takes over the display entirely - it reflects whatever's
-  // actually playing/queued on their account, not just what was added
-  // through our search box.
-  const usingRealSpotify = room.spotifyConnected;
+  // When Spotify is connected AND actually reporting something playing, its
+  // real playback state takes over the display - it reflects whatever's
+  // actually playing/queued on the host's account, not just what was added
+  // through our search box. But Spotify's own device-visibility API is
+  // notoriously unreliable (documented by Spotify itself) and can report
+  // "nothing playing" for minutes at a time even while it's genuinely
+  // active - if that happens, fall back to showing our own in-app queue
+  // instead of a misleadingly blank display. Adding a track always lands in
+  // the in-app queue regardless of whether it also reached Spotify, so this
+  // fallback is what actually shows people what's been queued in that case.
+  const usingRealSpotify = room.spotifyConnected && Boolean(spotifyPlayback?.nowPlaying);
   const nowPlayingInfo: PlaybackInfo | null = usingRealSpotify
-    ? spotifyPlayback?.nowPlaying
-      ? {
-          track: spotifyPlayback.nowPlaying.track,
-          progressMs: spotifyPlayback.nowPlaying.progressMs,
-          isPlaying: spotifyPlayback.nowPlaying.isPlaying,
-          fetchedAt: spotifyPlayback.nowPlaying.fetchedAt,
-        }
-      : null
+    ? {
+        track: spotifyPlayback!.nowPlaying!.track,
+        progressMs: spotifyPlayback!.nowPlaying!.progressMs,
+        isPlaying: spotifyPlayback!.nowPlaying!.isPlaying,
+        fetchedAt: spotifyPlayback!.nowPlaying!.fetchedAt,
+      }
     : room.nowPlaying
     ? {
         track: room.nowPlaying.track,
