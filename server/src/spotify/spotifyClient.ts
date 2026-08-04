@@ -77,7 +77,9 @@ export async function searchTracks(query: string, limit = 10): Promise<SpotifyTr
 
 // --- Authorization Code flow (per-host, used to control real playback) ---
 
-const SPOTIFY_SCOPES = "user-modify-playback-state user-read-playback-state user-read-currently-playing";
+// user-read-private is only needed to read back the account's product tier
+// (premium/free) for diagnostics - playback control itself doesn't need it.
+const SPOTIFY_SCOPES = "user-modify-playback-state user-read-playback-state user-read-currently-playing user-read-private";
 
 function getCredentials() {
   const clientId = process.env.SPOTIFY_CLIENT_ID;
