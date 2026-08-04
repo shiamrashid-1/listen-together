@@ -185,10 +185,49 @@ export async function refreshAccessToken(refreshToken: string): Promise<HostToke
   return { accessToken: data.access_token, refreshToken: data.refresh_token, expiresIn: data.expires_in };
 }
 
+/** A device Spotify knows about for this account, whether or not it's currently the active one. */
+interface SpotifyDevice {
+  id: string;
+  isActive: boolean;
+}
+
+async function getAvailableDevices(accessToken: string): Promise<SpotifyDevice[]> {
+  const response = await fetch("https://api.spotify.com/v1/me/player/devices", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) return [];
+  const data = (await response.json()) as { devices: Array<{ id: string | null; is_active: boolean }> };
+  return (data.devices ?? [])
+    .filter((d): d is { id: string; is_active: boolean } => Boolean(d.id))
+    .map((d) => ({ id: d.id, isActive: d.is_active }));
+}
+
+/** Starts playback of a single track on a specific device - used to bootstrap an "active device" (see `queueTrackForUser`). */
+async function startPlaybackOnDevice(accessToken: string, deviceId: string, uri: string): Promise<boolean> {
+  const url = new URL("https://api.spotify.com/v1/me/player/play");
+  url.searchParams.set("device_id", deviceId);
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ uris: [uri] }),
+  });
+  return response.status === 204 || response.ok;
+}
+
 export type QueueTrackResult =
   | { ok: true }
   | { ok: false; error: "premium_required" | "no_active_device" | "unknown" };
 
+/**
+ * Pushes a track onto the host's real Spotify queue. Spotify's queue
+ * endpoint has a quirk: it 404s unless the host already has an *active*
+ * playback session somewhere, even if their Spotify app is open with a
+ * device just sitting idle. Rather than making the host manually hit play
+ * on something first, we fall back to directly starting playback of this
+ * track on whatever device Spotify can see - that both plays the song the
+ * person actually asked for *and* establishes an active device so every
+ * queue call after this one works normally.
+ */
 export async function queueTrackForUser(accessToken: string, uri: string): Promise<QueueTrackResult> {
   const url = new URL("https://api.spotify.com/v1/me/player/queue");
   url.searchParams.set("uri", uri);
@@ -200,7 +239,16 @@ export async function queueTrackForUser(accessToken: string, uri: string): Promi
 
   if (response.status === 204 || response.ok) return { ok: true };
   if (response.status === 403) return { ok: false, error: "premium_required" };
-  if (response.status === 404) return { ok: false, error: "no_active_device" };
+
+  if (response.status === 404) {
+    const devices = await getAvailableDevices(accessToken);
+    const target = devices.find((d) => d.isActive) ?? devices[0];
+    if (target && (await startPlaybackOnDevice(accessToken, target.id, uri))) {
+      return { ok: true };
+    }
+    return { ok: false, error: "no_active_device" };
+  }
+
   return { ok: false, error: "unknown" };
 }
 

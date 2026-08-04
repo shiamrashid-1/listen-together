@@ -5,7 +5,7 @@ import type { SpotifyTrackResult } from "../types";
 
 const SPOTIFY_ERROR_MESSAGES: Record<string, string> = {
   premium_required: "Added to queue, but auto-queueing on Spotify needs Premium.",
-  no_active_device: "Added to queue, but open Spotify and start playing something first.",
+  no_active_device: "Added to queue, but no Spotify device is open anywhere - open the Spotify app (desktop, mobile, or web) and try again.",
   unknown: "Added to queue, but Spotify auto-queue failed.",
 };
 
