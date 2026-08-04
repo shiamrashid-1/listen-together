@@ -195,10 +195,17 @@ async function getAvailableDevices(accessToken: string): Promise<SpotifyDevice[]
   const response = await fetch("https://api.spotify.com/v1/me/player/devices", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  if (!response.ok) return [];
-  const data = (await response.json()) as { devices: Array<{ id: string | null; is_active: boolean }> };
+  if (!response.ok) {
+    console.warn(`[spotify] devices lookup failed (${response.status})`);
+    return [];
+  }
+  const data = (await response.json()) as { devices: Array<{ id: string | null; is_active: boolean; name: string; type: string; is_restricted?: boolean }> };
+  console.log(
+    `[spotify] devices seen:`,
+    (data.devices ?? []).map((d) => ({ name: d.name, type: d.type, active: d.is_active, restricted: d.is_restricted, hasId: Boolean(d.id) }))
+  );
   return (data.devices ?? [])
-    .filter((d): d is { id: string; is_active: boolean } => Boolean(d.id))
+    .filter((d): d is { id: string; is_active: boolean; name: string; type: string; is_restricted?: boolean } => Boolean(d.id) && !d.is_restricted)
     .map((d) => ({ id: d.id, isActive: d.is_active }));
 }
 
@@ -211,6 +218,10 @@ async function startPlaybackOnDevice(accessToken: string, deviceId: string, uri:
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ uris: [uri] }),
   });
+  if (response.status !== 204 && !response.ok) {
+    const body = await response.text().catch(() => "");
+    console.warn(`[spotify] start-playback-on-device failed (${response.status}): ${body}`);
+  }
   return response.status === 204 || response.ok;
 }
 
@@ -241,8 +252,11 @@ export async function queueTrackForUser(accessToken: string, uri: string): Promi
   if (response.status === 403) return { ok: false, error: "premium_required" };
 
   if (response.status === 404) {
+    const body = await response.text().catch(() => "");
+    console.log(`[spotify] queue push got 404 (${body}), looking for a device to bootstrap playback on`);
     const devices = await getAvailableDevices(accessToken);
     const target = devices.find((d) => d.isActive) ?? devices[0];
+    console.log(`[spotify] chosen bootstrap device:`, target ?? "none available");
     if (target && (await startPlaybackOnDevice(accessToken, target.id, uri))) {
       return { ok: true };
     }
