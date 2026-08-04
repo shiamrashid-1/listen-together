@@ -1,4 +1,4 @@
-import { refreshAccessToken } from "./spotifyClient.js";
+import { refreshAccessToken, SpotifyRefreshError } from "./spotifyClient.js";
 
 interface HostTokens {
   accessToken: string;
@@ -39,8 +39,15 @@ export function isConnected(code: string): boolean {
 /**
  * Returns a currently-valid access token for the room's host, refreshing it
  * first if it's expired or about to expire. Returns null if the host never
- * connected Spotify, or if the refresh attempt fails (in which case the
- * stored tokens are dropped so the UI can prompt to reconnect).
+ * connected Spotify, or if the refresh attempt fails.
+ *
+ * A failed refresh only drops the stored tokens (forcing a real reconnect)
+ * when Spotify has definitively rejected the refresh token itself - see
+ * `SpotifyRefreshError`. A transient failure (network blip, rate limit,
+ * Spotify-side 5xx) leaves the existing tokens in place and just returns
+ * null for this call, so the very next call (e.g. the poller 4s later)
+ * naturally retries instead of the whole connection being wiped out from
+ * under a still-valid session.
  */
 export async function getValidAccessToken(code: string): Promise<string | null> {
   const upperCode = code.toUpperCase();
@@ -65,8 +72,9 @@ export async function getValidAccessToken(code: string): Promise<string | null> 
       };
       tokensByRoom.set(upperCode, nextEntry);
       return nextEntry.accessToken;
-    } catch {
-      tokensByRoom.delete(upperCode);
+    } catch (err) {
+      const definitive = err instanceof SpotifyRefreshError ? err.definitive : false;
+      if (definitive) tokensByRoom.delete(upperCode);
       return null;
     } finally {
       refreshesInFlight.delete(upperCode);

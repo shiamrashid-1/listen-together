@@ -36,8 +36,6 @@ export interface RoomState {
   isSharing: boolean;
   spotifyConnected: boolean;
   messages: ChatMessage[];
-  skipVoterIds: string[];
-  skipVotesRequired: number;
 }
 
 export interface SpotifyTrackResult {

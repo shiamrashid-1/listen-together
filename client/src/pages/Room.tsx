@@ -117,10 +117,7 @@ export default function Room() {
           <div className="space-y-6">
             <NowPlayingCard
               playback={nowPlayingInfo}
-              isHost={isHost}
-              selfId={selfId}
-              skipVoterIds={room.skipVoterIds}
-              skipVotesRequired={room.skipVotesRequired}
+              showSkip={!usingRealSpotify}
               emptyMessage={
                 usingRealSpotify
                   ? "Nothing playing on Spotify right now."

@@ -6,7 +6,7 @@ A very basic web app for listening to Spotify with friends in real time:
 - Friends join from their browser using that code.
 - The host shares their Spotify tab's audio (via `getDisplayMedia`) and it's relayed live to everyone else in the room over WebRTC — audio only, no video, no screen visuals.
 - Anyone in the room can search Spotify's catalog and add songs to a shared queue. If the host connects their Spotify account, added songs also get pushed live onto the host's real Spotify queue.
-- Every queued track shows who added it. The host can skip instantly; everyone else can vote to skip, and the track is skipped once a majority of the room has voted.
+- Every queued track shows who added it.
 
 ## How audio sharing works (and its limits)
 

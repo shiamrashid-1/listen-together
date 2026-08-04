@@ -134,22 +134,47 @@ export async function exchangeCodeForTokens(code: string, redirectUri: string): 
   return { accessToken: data.access_token, refreshToken: data.refresh_token, expiresIn: data.expires_in };
 }
 
+/**
+ * Thrown by `refreshAccessToken` on failure. `definitive` distinguishes a
+ * refresh token that Spotify has actually rejected (revoked/rotated out -
+ * reconnecting is the only fix) from a transient hiccup (network blip, rate
+ * limit, Spotify 5xx) that's worth simply retrying later without treating
+ * the whole connection as dead. See `tokenStore.getValidAccessToken`.
+ */
+export class SpotifyRefreshError extends Error {
+  constructor(message: string, public readonly definitive: boolean) {
+    super(message);
+  }
+}
+
 export async function refreshAccessToken(refreshToken: string): Promise<HostTokenResult> {
   const { clientId, clientSecret } = getCredentials();
-  const response = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }).toString(),
-  });
+
+  let response: Response;
+  try {
+    response = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }).toString(),
+    });
+  } catch (err) {
+    throw new SpotifyRefreshError(`Network error reaching Spotify's token endpoint: ${err}`, false);
+  }
 
   if (!response.ok) {
-    throw new Error(`Spotify token refresh failed (${response.status})`);
+    // Spotify returns 400 with error=invalid_grant specifically when the
+    // refresh token itself has been revoked/rotated out from under us -
+    // that's the only case where the host actually needs to reconnect.
+    // Everything else (429 rate limit, 5xx, or a body we can't read) is
+    // transient and shouldn't throw away a perfectly good connection.
+    const definitive = response.status === 400 || response.status === 401;
+    throw new SpotifyRefreshError(`Spotify token refresh failed (${response.status})`, definitive);
   }
 
   const data = (await response.json()) as {
@@ -213,13 +238,21 @@ function mapRawTrack(item: RawSpotifyTrack): SpotifyPlaybackTrack {
   };
 }
 
-/** Returns null if nothing is currently playing (including a paused-with-nothing-loaded state). */
+/**
+ * Returns null when there's *legitimately* nothing playing (204, or a valid
+ * response with no item loaded - e.g. paused with nothing queued up).
+ * Throws for anything else (network error, rate limit, Spotify-side 5xx) so
+ * callers can tell "nothing playing" apart from "couldn't find out right
+ * now" and avoid clobbering a perfectly good now-playing display with a
+ * false-empty one - see `playbackPoller.ts`.
+ */
 export async function getCurrentPlayback(accessToken: string): Promise<CurrentPlayback | null> {
   const response = await fetch("https://api.spotify.com/v1/me/player", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
-  if (response.status === 204 || !response.ok) return null;
+  if (response.status === 204) return null;
+  if (!response.ok) throw new Error(`Spotify playback fetch failed (${response.status})`);
 
   const data = (await response.json()) as {
     item: RawSpotifyTrack | null;
@@ -235,12 +268,17 @@ export async function getCurrentPlayback(accessToken: string): Promise<CurrentPl
   };
 }
 
-/** Spotify's own upcoming queue for the user's active session - separate from our in-app wishlist. */
+/**
+ * Spotify's own upcoming queue for the user's active session - separate
+ * from our in-app wishlist. Throws on failure rather than returning an
+ * empty list - see `getCurrentPlayback`'s note on why that distinction
+ * matters here.
+ */
 export async function getUpcomingQueue(accessToken: string): Promise<SpotifyPlaybackTrack[]> {
   const response = await fetch("https://api.spotify.com/v1/me/player/queue", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  if (!response.ok) return [];
+  if (!response.ok) throw new Error(`Spotify queue fetch failed (${response.status})`);
 
   const data = (await response.json()) as { queue: RawSpotifyTrack[] };
   return (data.queue ?? []).slice(0, 15).map(mapRawTrack);

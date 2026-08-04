@@ -50,11 +50,17 @@ export function startPolling(code: string, io: Server) {
   const tick = async () => {
     const accessToken = await tokenStore.getValidAccessToken(upperCode);
     if (!accessToken) {
-      // The host's Spotify connection is genuinely dead (they revoked
-      // access, or the refresh token stopped working) - stop polling and
-      // flip the room back to "not connected" so the UI falls back to the
-      // in-app simulated queue instead of being stuck showing a blank
-      // now-playing/queue forever.
+      if (tokenStore.isConnected(upperCode)) {
+        // Tokens still exist - this was a transient refresh hiccup (network
+        // blip, rate limit, Spotify-side 5xx), not a real disconnection.
+        // Skip this tick and retry shortly instead of wiping out a
+        // perfectly good now-playing/queue display.
+        return;
+      }
+      // The connection is genuinely dead (host revoked access, or the
+      // refresh token was actually rejected) - stop polling and flip the
+      // room back to "not connected" so the UI falls back to the in-app
+      // simulated queue instead of being stuck showing a blank display.
       stopPolling(upperCode);
       const updated = roomStore.setSpotifyConnected(upperCode, false);
       if (updated) io.to(upperCode).emit("room:state", updated);
@@ -62,10 +68,16 @@ export function startPolling(code: string, io: Server) {
       return;
     }
 
-    const [playback, queue] = await Promise.all([
-      getCurrentPlayback(accessToken).catch(() => null),
-      getUpcomingQueue(accessToken).catch(() => [] as SpotifyPlaybackTrack[]),
-    ]);
+    let playback: Awaited<ReturnType<typeof getCurrentPlayback>>;
+    let queue: SpotifyPlaybackTrack[];
+    try {
+      [playback, queue] = await Promise.all([getCurrentPlayback(accessToken), getUpcomingQueue(accessToken)]);
+    } catch {
+      // Couldn't reach Spotify at all this round (rate limit, transient
+      // 5xx, network blip) - don't broadcast a false-empty state over
+      // what's likely still a perfectly good display. Just retry next tick.
+      return;
+    }
 
     const liveTracks = playback ? [playback.track, ...queue] : queue;
     const attribution = roomStore.getSpotifyAttribution(upperCode);

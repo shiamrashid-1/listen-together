@@ -39,8 +39,4 @@ export interface RoomState {
   spotifyConnected: boolean;
   /** Recent chat history (capped) - hydrates clients that join or reconnect. */
   messages: ChatMessage[];
-  /** IDs of participants who've voted to skip the currently playing track. Resets whenever it changes. */
-  skipVoterIds: string[];
-  /** How many votes are needed to skip the currently playing track, given the current room size. */
-  skipVotesRequired: number;
 }
