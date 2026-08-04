@@ -27,6 +27,16 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const activeRoomRef = useRef<{ code: string; name: string } | null>(null);
   const hasConnectedBeforeRef = useRef(false);
 
+  // A network hiccup (the same kind that can interrupt WebRTC on stricter
+  // networks) can also drop the Socket.IO connection, which reconnects with
+  // a brand-new socket id - as far as the server is concerned that looks
+  // like a totally different participant. This id is generated once per tab
+  // and sent along with every create/join so the server can recognize "this
+  // is the same browser reconnecting" and hand identity (host status, etc.)
+  // back over, instead of treating it as someone else joining while the old
+  // slot quietly gets cleaned up as a departure.
+  const clientIdRef = useRef<string>(crypto.randomUUID());
+
   useEffect(() => {
     const handleRoomState = (nextRoom: RoomState) => setRoom(nextRoom);
 
@@ -42,7 +52,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         const { code, name } = activeRoomRef.current;
         socket.emit(
           "room:join",
-          { code, name },
+          { code, name, clientId: clientIdRef.current },
           (res: { ok: true; room: RoomState } | { ok: false; error: string }) => {
             if (res.ok) {
               setRoom(res.room);
@@ -102,7 +112,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       return new Promise<RoomState>((resolve, reject) => {
         socket.emit(
           "room:create",
-          { name },
+          { name, clientId: clientIdRef.current },
           (res: { ok: true; room: RoomState } | { ok: false; error: string }) => {
             if (res.ok) {
               activeRoomRef.current = { code: res.room.code, name };
@@ -127,7 +137,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       return new Promise<RoomState>((resolve, reject) => {
         socket.emit(
           "room:join",
-          { code, name },
+          { code, name, clientId: clientIdRef.current },
           (res: { ok: true; room: RoomState } | { ok: false; error: string }) => {
             if (res.ok) {
               activeRoomRef.current = { code: res.room.code, name };

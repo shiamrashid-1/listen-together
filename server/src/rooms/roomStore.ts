@@ -3,10 +3,15 @@ import type { ChatMessage, NowPlaying, Participant, QueueTrack, RoomState } from
 const MAX_CHAT_HISTORY = 100;
 const MAX_MESSAGE_LENGTH = 500;
 
+/** Internal-only participant record - `clientId` is never sent to clients (see `toRoomState`). */
+interface ParticipantRecord extends Participant {
+  clientId?: string;
+}
+
 interface Room {
   code: string;
   hostId: string;
-  participants: Map<string, Participant>;
+  participants: Map<string, ParticipantRecord>;
   queue: QueueTrack[];
   nowPlaying: NowPlaying | null;
   /** Timer that auto-advances to the next track when the current one ends. Never serialized. */
@@ -24,9 +29,33 @@ interface Room {
    * Capped so a long-lived room doesn't grow this unboundedly.
    */
   spotifyAttribution: Array<{ uri: string; name: string }>;
+  /**
+   * Maps each browser tab's persistent client id to its current participant
+   * (socket) id, so a reconnect can reclaim its old spot - see `joinRoom`.
+   */
+  clientIds: Map<string, string>;
+  /**
+   * Participants whose socket just disconnected, pending actual removal -
+   * see `scheduleParticipantRemoval`. Kept in `participants` (so they don't
+   * look like they left, and the room isn't deleted/host isn't reassigned)
+   * until the grace timer fires without a reconnect reclaiming the slot.
+   */
+  pendingRemovals: Map<string, NodeJS.Timeout>;
 }
 
 const MAX_SPOTIFY_ATTRIBUTION_ENTRIES = 200;
+
+/**
+ * How long a disconnected participant's slot is held open for a reconnect
+ * to reclaim (see `joinRoom`'s clientId matching) before being treated as a
+ * genuine departure. Generous on purpose: a restrictive/flaky network can
+ * take several socket.io reconnection attempts (with backoff) plus the
+ * server's own ping-timeout-based disconnect detection to recover - the
+ * same class of network trouble that can interrupt WebRTC. Without this,
+ * a host's brief network blip looks identical to them leaving, which
+ * reassigns host and silently disconnects Spotify.
+ */
+const DISCONNECT_GRACE_MS = 20000;
 
 /** Strict majority of the current room, minimum 1 - used as the vote-skip threshold. */
 function computeSkipVotesRequired(participantCount: number): number {
@@ -94,7 +123,7 @@ function toRoomState(room: Room): RoomState {
   return {
     code: room.code,
     hostId: room.hostId,
-    participants: Array.from(room.participants.values()),
+    participants: Array.from(room.participants.values()).map(({ id, name, isHost }) => ({ id, name, isHost })),
     queue: room.queue,
     nowPlaying: room.nowPlaying,
     isSharing: room.isSharing,
@@ -105,12 +134,12 @@ function toRoomState(room: Room): RoomState {
   };
 }
 
-export function createRoom(hostId: string, hostName: string): RoomState {
+export function createRoom(hostId: string, hostName: string, clientId?: string): RoomState {
   const code = generateCode();
   const room: Room = {
     code,
     hostId,
-    participants: new Map([[hostId, { id: hostId, name: hostName, isHost: true }]]),
+    participants: new Map([[hostId, { id: hostId, name: hostName, isHost: true, clientId }]]),
     queue: [],
     nowPlaying: null,
     advanceTimer: null,
@@ -120,15 +149,40 @@ export function createRoom(hostId: string, hostName: string): RoomState {
     createdAt: Date.now(),
     skipVotes: new Set(),
     spotifyAttribution: [],
+    clientIds: clientId ? new Map([[clientId, hostId]]) : new Map(),
+    pendingRemovals: new Map(),
   };
   rooms.set(code, room);
   return toRoomState(room);
 }
 
-export function joinRoom(code: string, participantId: string, name: string): RoomState | null {
+export function joinRoom(code: string, participantId: string, name: string, clientId?: string): RoomState | null {
   const room = rooms.get(code.toUpperCase());
   if (!room) return null;
-  room.participants.set(participantId, { id: participantId, name, isHost: false });
+
+  // If this browser tab already held a spot in this room (most likely
+  // reconnecting after a network blip) and hasn't been fully removed yet,
+  // reclaim it under the new socket id instead of registering as a brand
+  // new guest - this preserves host status, votes, etc. across the drop.
+  const oldParticipantId = clientId ? room.clientIds.get(clientId) : undefined;
+  if (oldParticipantId && room.participants.has(oldParticipantId) && oldParticipantId !== participantId) {
+    const pendingTimer = room.pendingRemovals.get(oldParticipantId);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      room.pendingRemovals.delete(oldParticipantId);
+    }
+
+    const existing = room.participants.get(oldParticipantId)!;
+    room.participants.delete(oldParticipantId);
+    room.participants.set(participantId, { ...existing, id: participantId, name });
+    if (clientId) room.clientIds.set(clientId, participantId);
+    if (room.hostId === oldParticipantId) room.hostId = participantId;
+    if (room.skipVotes.delete(oldParticipantId)) room.skipVotes.add(participantId);
+    return toRoomState(room);
+  }
+
+  room.participants.set(participantId, { id: participantId, name, isHost: false, clientId });
+  if (clientId) room.clientIds.set(clientId, participantId);
   return toRoomState(room);
 }
 
@@ -144,12 +198,8 @@ export function findRoomByParticipant(participantId: string): Room | null {
   return null;
 }
 
-/**
- * Removes a participant. If the host leaves, promotes the longest-standing
- * remaining participant to host. Deletes the room once empty.
- * Returns the updated room state, or null if the room no longer exists.
- */
-export function removeParticipant(
+/** Actually removes a participant - see `scheduleParticipantRemoval` for the debounced, public entry point. */
+function finalizeRemoval(
   participantId: string
 ): { room: RoomState; deleted: boolean; hostChanged: boolean } | null {
   const room = findRoomByParticipant(participantId);
@@ -157,16 +207,21 @@ export function removeParticipant(
 
   room.participants.delete(participantId);
   room.skipVotes.delete(participantId);
+  room.pendingRemovals.delete(participantId);
+  for (const [clientId, mappedId] of room.clientIds) {
+    if (mappedId === participantId) room.clientIds.delete(clientId);
+  }
 
   if (room.participants.size === 0) {
     if (room.advanceTimer) clearTimeout(room.advanceTimer);
+    for (const timer of room.pendingRemovals.values()) clearTimeout(timer);
     rooms.delete(room.code);
     return { room: toRoomState(room), deleted: true, hostChanged: false };
   }
 
   let hostChanged = false;
   if (room.hostId === participantId) {
-    const [nextHostId, nextHost] = room.participants.entries().next().value as [string, Participant];
+    const [nextHostId, nextHost] = room.participants.entries().next().value as [string, ParticipantRecord];
     room.hostId = nextHostId;
     room.participants.set(nextHostId, { ...nextHost, isHost: true });
     room.isSharing = false; // previous host's audio share is gone
@@ -174,6 +229,28 @@ export function removeParticipant(
   }
 
   return { room: toRoomState(room), deleted: false, hostChanged };
+}
+
+/**
+ * Called when a participant's socket disconnects. Rather than removing them
+ * (and potentially reassigning host / tearing down Spotify) immediately, we
+ * hold their slot open for `DISCONNECT_GRACE_MS` in case it's just a network
+ * blip and `joinRoom` reclaims it with a matching clientId. `onFinalize`
+ * only fires if the grace period elapses without a reclaim - i.e. it's a
+ * genuine departure.
+ */
+export function scheduleParticipantRemoval(
+  participantId: string,
+  onFinalize: (result: { room: RoomState; deleted: boolean; hostChanged: boolean }) => void
+): void {
+  const room = findRoomByParticipant(participantId);
+  if (!room || room.pendingRemovals.has(participantId)) return;
+
+  const timer = setTimeout(() => {
+    const result = finalizeRemoval(participantId);
+    if (result) onFinalize(result);
+  }, DISCONNECT_GRACE_MS);
+  room.pendingRemovals.set(participantId, timer);
 }
 
 export function setSharing(code: string, isSharing: boolean): RoomState | null {
