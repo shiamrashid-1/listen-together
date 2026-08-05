@@ -6,8 +6,10 @@ const PENDING_SUBSCRIBER_TIMEOUT_MS = 15000;
 // How often buffered fragment output gets flushed to socket-based
 // subscribers, as one combined chunk. This no longer needs to be large for
 // decode-stability reasons (see extractInitSegment/MediaSource below) - it's
-// just batching to keep the number of Socket.IO messages reasonable.
-const SOCKET_CHUNK_FLUSH_MS = 300;
+// just batching to keep the number of Socket.IO messages, and thus round
+// trips, reasonable on the exact kind of heavily-proxied/throttled network
+// that needed this fallback in the first place.
+const SOCKET_CHUNK_FLUSH_MS = 500;
 
 type ChunkListener = (chunk: Buffer) => void;
 

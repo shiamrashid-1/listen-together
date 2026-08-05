@@ -171,15 +171,22 @@ async function logSelectedCandidatePair(pc: RTCPeerConnection, label: string) {
 const RELAY_MIME_TYPE = 'audio/mp4; codecs="mp4a.40.2"';
 
 /**
- * How much buffered-ahead audio to wait for before starting playback. This
- * is purely a smoother-start nicety, not a correctness requirement: once
- * playing, MediaSource handles a slow/late fragment by pausing and
- * resuming on its own (the "waiting"/native buffering behavior every video
- * site relies on) with no click or glitch, unlike decoding independent
- * chunks by hand. A bit of lead just avoids an near-immediate stall right
- * out of the gate on a slow network.
+ * How much buffered-ahead audio to require before EVER starting playback.
+ * Generous on purpose so a slow start doesn't immediately run dry again.
  */
-const RELAY_STARTUP_BUFFER_SECONDS = 1;
+const RELAY_STARTUP_BUFFER_SECONDS = 2;
+
+/**
+ * How much buffered-ahead audio to rebuild before resuming after we've
+ * already run dry once. A throttled/proxied network (the kind that blocks
+ * WebRTC outright in the first place) can average out fine over time but
+ * still stall out repeatedly for a moment at a time - left alone, the
+ * browser resumes playback the instant a single byte arrives, which just
+ * sets up the next stall a few seconds later. Explicitly pausing on "waiting"
+ * and rebuilding a real cushion before resuming trades a bit more delay for
+ * something that actually stays smooth on exactly the networks that need it.
+ */
+const RELAY_REBUFFER_SECONDS = 3;
 
 /**
  * Plays the continuous fragmented-MP4/AAC stream produced by the server's
@@ -208,10 +215,14 @@ class LiveAudioPlayer {
   private mediaSource: MediaSource;
   private sourceBuffer: SourceBuffer | null = null;
   private queue: ArrayBuffer[] = [];
-  private startedPlayback = false;
+  private isPlaying = false;
+  private hasPlayedOnce = false;
   private mseUnsupported = false;
+  /** Notified whenever an autoplay-blocked state changes, so the UI can prompt for a click. */
+  private onNeedsResumeChange: (needsResume: boolean) => void;
 
-  constructor() {
+  constructor(onNeedsResumeChange: (needsResume: boolean) => void) {
+    this.onNeedsResumeChange = onNeedsResumeChange;
     this.audio = document.createElement("audio");
     this.audio.style.display = "none";
     document.body.appendChild(this.audio);
@@ -225,11 +236,23 @@ class LiveAudioPlayer {
 
     this.mediaSource = new MediaSource();
     this.audio.src = URL.createObjectURL(this.mediaSource);
+
+    // Fires when playback runs out of buffered data - i.e. we've stalled.
+    // Left alone, the element resumes the instant a single byte arrives,
+    // which (on a network that stalls repeatedly rather than just once)
+    // just sets up the next stall moments later. Pausing explicitly here
+    // forces maybeResumePlayback to rebuild a real cushion first.
+    this.audio.addEventListener("waiting", () => {
+      if (!this.isPlaying) return;
+      this.isPlaying = false;
+      this.audio.pause();
+    });
+
     this.mediaSource.addEventListener("sourceopen", () => {
       try {
         this.sourceBuffer = this.mediaSource.addSourceBuffer(RELAY_MIME_TYPE);
         this.sourceBuffer.addEventListener("updateend", () => {
-          this.maybeStartPlayback();
+          this.maybeResumePlayback();
           this.pump();
         });
         this.pump();
@@ -239,12 +262,9 @@ class LiveAudioPlayer {
     });
   }
 
-  get needsResume(): boolean {
-    return this.audio.paused && this.startedPlayback;
-  }
-
+  /** Explicit user-gesture retry after an autoplay block - safe to call any other time too. */
   resume(): Promise<void> {
-    return this.audio.play();
+    return this.startPlayback();
   }
 
   pushChunk(chunk: ArrayBuffer) {
@@ -264,17 +284,33 @@ class LiveAudioPlayer {
     }
   }
 
-  private maybeStartPlayback() {
-    if (this.startedPlayback || !this.sourceBuffer) return;
+  private maybeResumePlayback() {
+    if (this.isPlaying || !this.sourceBuffer) return;
+    // The very first start gets the most generous cushion (nothing's played
+    // yet, so there's no rush); a stall mid-playback rebuilds a smaller but
+    // still deliberately generous one before letting sound continue.
+    const target = this.hasPlayedOnce ? RELAY_REBUFFER_SECONDS : RELAY_STARTUP_BUFFER_SECONDS;
     const buffered = this.sourceBuffer.buffered;
     if (buffered.length === 0) return;
     const bufferedAhead = buffered.end(buffered.length - 1) - this.audio.currentTime;
-    if (bufferedAhead < RELAY_STARTUP_BUFFER_SECONDS) return;
-    this.startedPlayback = true;
-    this.audio.play().catch(() => {
-      // Autoplay may be blocked until a user gesture - resumeFallbackAudio()
-      // (triggered from a click in the UI) retries this.
-    });
+    if (bufferedAhead < target) return;
+    this.startPlayback();
+  }
+
+  private startPlayback(): Promise<void> {
+    return this.audio.play().then(
+      () => {
+        this.isPlaying = true;
+        this.hasPlayedOnce = true;
+        this.onNeedsResumeChange(false);
+      },
+      () => {
+        // Autoplay blocked without a user gesture. Only relevant the very
+        // first time - once a gesture has let it play once, later
+        // programmatic resumes (after a stall) aren't re-blocked.
+        this.onNeedsResumeChange(true);
+      }
+    );
   }
 
   close() {
@@ -319,10 +355,7 @@ export function useAudioMesh({ isHost, participants, selfId, roomIsSharing }: Us
   const fallbackSubscribedRef = useRef(false);
 
   const resumeFallbackAudio = useCallback(() => {
-    fallbackPlayerRef.current?.resume().then(
-      () => setFallbackNeedsResume(false),
-      () => setFallbackNeedsResume(true)
-    );
+    fallbackPlayerRef.current?.resume().catch(() => {});
   }, []);
 
   // Lifted out of the offer-handling effect so both the "WebRTC didn't
@@ -335,10 +368,11 @@ export function useAudioMesh({ isHost, participants, selfId, roomIsSharing }: Us
     }
     fallbackSubscribedRef.current = true;
     console.warn(`[audio] falling back to socket-relayed audio stream (reason: ${reason})`);
-    const player = fallbackPlayerRef.current ?? new LiveAudioPlayer();
+    // Playback only actually starts once enough is buffered (see
+    // maybeResumePlayback) - autoplay-blocked state is reported
+    // asynchronously via this callback whenever that first attempt happens.
+    const player = fallbackPlayerRef.current ?? new LiveAudioPlayer((needsResume) => setFallbackNeedsResume(needsResume));
     fallbackPlayerRef.current = player;
-    player.resume().catch(() => {});
-    setFallbackNeedsResume(player.needsResume);
     socket.emit("audio:relay-subscribe");
     setFallbackActive(true);
     setFallbackReason(reason);
