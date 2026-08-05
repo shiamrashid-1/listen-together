@@ -38,9 +38,9 @@ export function registerSignalingHandlers(io: Server, socket: Socket) {
   // Fallback path for listeners whose network can't establish a WebRTC
   // connection at all (e.g. locked-down proxied networks). The host streams
   // the same captured audio here as recorded webm/opus chunks, which get
-  // transcoded server-side into a continuous fragmented-MP4/AAC stream (see
-  // audioRelay.ts) - always-on alongside WebRTC so the fallback is instantly
-  // available if/when a listener needs it.
+  // transcoded server-side into a continuous MP3 stream (see audioRelay.ts)
+  // - always-on alongside WebRTC so the fallback is instantly available
+  // if/when a listener needs it.
   socket.on("audio:chunk", (chunk: ArrayBuffer) => {
     const code = socket.data.roomCode as string | undefined;
     if (!code) return;
@@ -50,8 +50,8 @@ export function registerSignalingHandlers(io: Server, socket: Socket) {
   // Some networks block long-lived streaming HTTP connections outright even
   // though the WebSocket transport carrying this very event works fine (it's
   // the same connection powering room state/chat/signaling). For listeners
-  // whose WebRTC connection fails, this delivers the relay's fragmented-MP4
-  // output as binary chunks over that already-proven connection instead.
+  // whose WebRTC connection fails, this delivers the relay's MP3 output as
+  // binary chunks over that already-proven connection instead.
   socket.on("audio:relay-subscribe", () => {
     const code = socket.data.roomCode as string | undefined;
     if (!code) return;

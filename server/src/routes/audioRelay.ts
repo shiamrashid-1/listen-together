@@ -5,11 +5,10 @@ import * as audioRelay from "../audio/audioRelay.js";
 export const audioRelayRouter = Router();
 
 /**
- * Raw HTTP byte stream of the room's relay output (fragmented MP4/AAC) -
- * mainly useful for debugging/manual inspection. The app itself no longer
- * plays audio through this directly (see the Socket.IO-delivered
- * MediaSource path in useAudioMesh.ts); a live-growing fragmented MP4 isn't
- * reliably playable via a plain <audio src> the way progressive MP3 was.
+ * Raw HTTP byte stream of the room's relay output (MP3) - mainly useful for
+ * debugging/manual inspection. The app itself plays audio through the
+ * Socket.IO-delivered path in useAudioMesh.ts instead, since some networks
+ * block long-lived streaming HTTP connections outright.
  */
 audioRelayRouter.get("/live/:code", (req, res) => {
   const code = req.params.code.toUpperCase();
@@ -19,7 +18,7 @@ audioRelayRouter.get("/live/:code", (req, res) => {
   }
 
   res.writeHead(200, {
-    "Content-Type": "audio/mp4",
+    "Content-Type": "audio/mpeg",
     "Cache-Control": "no-store",
     Connection: "keep-alive",
   });
