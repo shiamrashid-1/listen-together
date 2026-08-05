@@ -55,9 +55,9 @@ export default function AudioShare({
       <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
         <p className="text-xs font-medium uppercase tracking-wide text-white/50">Your audio</p>
         <p className="mt-1 text-sm text-white/60">
-          Share your browser tab playing Spotify (open{" "}
-          <span className="text-white/80">open.spotify.com</span> in another tab) and everyone in
-          the room will hear it live.
+          Share whatever's playing Spotify - a browser tab (
+          <span className="text-white/80">open.spotify.com</span>), the Spotify desktop app
+          window, or your entire screen - and everyone in the room will hear it live.
         </p>
 
         {!isDisplayCaptureSupported && (
@@ -82,7 +82,9 @@ export default function AudioShare({
 
         {isSharing && (
           <p className="mt-3 text-xs text-white/50">
-            When the browser prompt appears, choose the Spotify tab and tick <b>“Share tab audio”</b>.
+            When the browser prompt appears, pick the Spotify tab, the Spotify app window, or your
+            entire screen, and make sure <b>“Share audio”</b> (or “Share tab/system audio”) is
+            ticked.
           </p>
         )}
       </div>

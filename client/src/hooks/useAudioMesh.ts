@@ -29,6 +29,19 @@ export const isDisplayCaptureSupported =
   typeof navigator !== "undefined" && Boolean(navigator.mediaDevices?.getDisplayMedia);
 
 /**
+ * Not yet in TypeScript's bundled DOM types (shipped in Chrome 141, Sept
+ * 2025). Hints that when the user picks a specific application *window*
+ * (as opposed to a tab or the entire screen) - e.g. the Spotify desktop
+ * app, not just the browser tab - the picker should offer to share that
+ * window's own audio specifically, via Windows' per-process WASAPI
+ * capture. Without this hint, browsers aren't required to offer any audio
+ * option at all for a plain window selection.
+ */
+interface DisplayMediaOptionsWithWindowAudio extends DisplayMediaStreamOptions {
+  windowAudio?: "exclude" | "system" | "window";
+}
+
+/**
  * How long a listener waits for WebRTC to reach "connected" before falling
  * back to the HTTP relay stream. Generous on purpose - most connections that
  * are going to succeed do so within a couple seconds, but TURN relay
@@ -481,13 +494,17 @@ export function useAudioMesh({ isHost, participants, selfId, roomIsSharing }: Us
           autoGainControl: false,
           channelCount: 2,
         } as MediaTrackConstraints,
-      });
+        // If the user picks a specific window (e.g. the Spotify desktop
+        // app rather than a browser tab), prefer offering that window's
+        // own audio rather than no audio option at all.
+        windowAudio: "window",
+      } as DisplayMediaOptionsWithWindowAudio);
 
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length === 0) {
         stream.getTracks().forEach((track) => track.stop());
         setCaptureError(
-          "No audio was captured. When prompted, pick the Spotify tab (not 'Entire Screen') and make sure to tick 'Share tab audio'."
+          "No audio was captured. When prompted, make sure to tick 'Share audio' - this works whether you pick the Spotify tab, the Spotify app window, or your entire screen."
         );
         return;
       }

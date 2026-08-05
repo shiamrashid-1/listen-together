@@ -10,20 +10,20 @@ A very basic web app for listening to Spotify with friends in real time:
 
 ## How audio sharing works (and its limits)
 
-The host clicks **Share my audio**, picks the browser tab playing `open.spotify.com`, and ticks **"Share tab audio"** in the browser prompt. That audio track is sent directly (peer-to-peer, mesh topology) to every other participant's browser over WebRTC — nothing is uploaded to a server.
+The host clicks **Share my audio** and picks whatever's actually playing Spotify — the `open.spotify.com` browser tab, the Spotify desktop app window, or the entire screen — ticking **"Share audio"** in the browser prompt. That audio track is sent directly (peer-to-peer, mesh topology) to every other participant's browser over WebRTC — nothing is uploaded to a server.
 
 Some networks (strict corporate/school firewalls, proxies that block anything but tunneled HTTP) block WebRTC outright, even with a TURN relay configured — and some of those also block long-lived streaming HTTP connections. For listeners on networks like that, the app automatically falls back to a relay delivered over the same Socket.IO connection already powering room state/chat: the host's audio is recorded, transcoded live to a fragmented MP4/AAC stream on the server, and played on the listener's side via MediaSource Extensions (the same continuous-decode-timeline approach video sites use), which avoids any per-chunk glitching. It kicks in automatically after ~8 seconds if WebRTC hasn't connected, runs a few seconds behind live, and is clearly labeled as "backup stream" in the UI so it's obvious when it's active.
 
-Browser support for tab-audio capture varies:
+Browser support for this kind of audio capture varies:
 
 | Browser | Support |
 | --- | --- |
-| Chrome / Edge (Windows, ChromeOS, Linux) | Best support for both tab audio and system audio |
-| Chrome / Edge (macOS) | Tab audio capture works; full system audio capture needs a virtual audio driver (e.g. BlackHole) |
+| Chrome / Edge 141+ (Windows) | Tab, per-window (e.g. the Spotify desktop app specifically, not other system sounds), and full-screen/system audio all work |
+| Chrome / Edge, older versions or other platforms | Tab audio capture works everywhere; window-specific audio capture depends on OS support (Windows-only so far) and falls back to offering system audio instead when unavailable; macOS system audio capture needs a virtual audio driver (e.g. BlackHole) |
 | Firefox | Partial/inconsistent |
 | Safari | Not supported |
 
-Because Spotify streams are DRM-protected, always share the **Spotify Web Player tab specifically** (not the whole desktop app) for the most reliable capture.
+Spotify's DRM doesn't get in the way here either way — all of these methods capture audio after it's already been decoded to sound, the same way as recording "what you hear"/stereo-mix always has, rather than intercepting the protected stream itself.
 
 The queue is always a shared wishlist that everyone can see, whether or not the host connects Spotify — search results come from Spotify's public catalog (no login needed for that part). See [Real Spotify queueing](#real-spotify-queueing-optional) below for how the host can make "Add" also queue live on their own player.
 
