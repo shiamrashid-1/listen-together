@@ -107,22 +107,20 @@ function preferHighQualityOpus(sdp: string): string {
 }
 
 /**
- * Chrome buffers incoming audio to smooth out network jitter. We previously
- * forced this buffer down to ~40ms for a snappier "live" feel, but that
- * removes the slack a real cross-network/cellular connection needs to
- * absorb jitter - on those links it caused enough dropped/late packets to
- * make audio choppy or fully silent, even though the connection looked
- * "connected." Chrome's default adaptive jitter buffer already balances
- * latency against the jitter it's actually observing per-connection, so we
- * only nudge it down a little instead of forcing it to a fixed floor - a
- * modest latency win on good networks, without starving playback on bad ones.
+ * Chrome buffers incoming audio to smooth out network jitter. Bigger rooms
+ * (10-30+ people) see more stuttering even within the direct-mesh cap,
+ * mainly from ordinary per-listener network jitter rather than the host's
+ * bandwidth - the fix for that is more absorbing buffer, not less. This
+ * trades a bit more latency (listeners hear audio ~1/4s later) for a much
+ * larger cushion against late/reordered packets before anything audibly
+ * drops out.
  */
 function reduceReceiverLatency(receiver: RTCRtpReceiver) {
   const tunableReceiver = receiver as RTCRtpReceiver & {
     jitterBufferTarget?: number;
   };
   try {
-    tunableReceiver.jitterBufferTarget = 150;
+    tunableReceiver.jitterBufferTarget = 300;
   } catch {
     // Non-Chrome browsers may not support this - safe to ignore.
   }
@@ -181,10 +179,25 @@ async function logSelectedCandidatePair(pc: RTCPeerConnection, label: string) {
  * already-connected, already-proven WebSocket instead of a separate HTTP
  * stream, so it stays viable anywhere the rest of the app already works.
  */
+/**
+ * How much decoded audio to keep queued up ahead of the playback head
+ * before trusting the pipeline enough to actually start/resume sound.
+ * Chunks arrive roughly once per server flush interval - if delivery of the
+ * next one is ever late by less than this, playback just eats into the
+ * cushion instead of an audible gap. Bigger number = more resistant to
+ * stuttering, at the cost of that much more delay versus the host's real
+ * audio - a trade explicitly worth making for passive group listening.
+ */
+const RELAY_TARGET_LEAD_SECONDS = 1.5;
+
 class LiveAudioPlayer {
   private ctx: AudioContext;
   private nextStartTime = 0;
   private chain: Promise<void> = Promise.resolve();
+  // While priming, decoded chunks are held here (not yet scheduled) until
+  // enough is queued up to survive normal jitter without running dry.
+  private isPriming = true;
+  private primeBuffer: AudioBuffer[] = [];
 
   constructor() {
     const AudioContextCtor =
@@ -211,16 +224,38 @@ class LiveAudioPlayer {
     } catch {
       return; // an occasional non-frame-aligned fragment - safe to drop
     }
-    // If we've fallen behind (e.g. after a decode error or a network hiccup),
-    // catch back up to "now" instead of trying to play a growing backlog.
-    if (this.nextStartTime < this.ctx.currentTime) this.nextStartTime = this.ctx.currentTime;
 
+    // Ran dry (first chunk ever, or the buffer we built up got fully consumed
+    // by a network stall bigger than our cushion) - rebuild a real lead
+    // before playing anything else, rather than resuming with almost no
+    // margin and setting up the very next chunk to stutter again too.
+    if (this.nextStartTime === 0 || this.nextStartTime < this.ctx.currentTime) {
+      this.isPriming = true;
+      this.nextStartTime = 0;
+      this.primeBuffer = [];
+    }
+
+    if (this.isPriming) {
+      this.primeBuffer.push(buffer);
+      const queued = this.primeBuffer.reduce((sum, b) => sum + b.duration, 0);
+      if (queued < RELAY_TARGET_LEAD_SECONDS) return; // keep priming
+
+      this.isPriming = false;
+      this.nextStartTime = this.ctx.currentTime + 0.1;
+      for (const primed of this.primeBuffer) this.scheduleBuffer(primed);
+      this.primeBuffer = [];
+      return;
+    }
+
+    this.scheduleBuffer(buffer);
+  }
+
+  private scheduleBuffer(buffer: AudioBuffer) {
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(this.ctx.destination);
-    const startAt = Math.max(this.ctx.currentTime + 0.05, this.nextStartTime);
-    source.start(startAt);
-    this.nextStartTime = startAt + buffer.duration;
+    source.start(this.nextStartTime);
+    this.nextStartTime += buffer.duration;
   }
 
   close() {

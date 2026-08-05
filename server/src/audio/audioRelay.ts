@@ -7,8 +7,12 @@ const PENDING_SUBSCRIBER_TIMEOUT_MS = 15000;
 // one combined chunk. Bigger than the HTTP path's immediate per-byte
 // forwarding on purpose: MP3 frames are independently decodable, but only if
 // a chunk contains enough of them - very small/oddly-cut chunks decode
-// inconsistently via the Web Audio API on the listener side.
-const SOCKET_CHUNK_FLUSH_MS = 700;
+// inconsistently via the Web Audio API on the listener side. Larger, less
+// frequent chunks are also more resistant to Socket.IO delivery jitter -
+// listeners pre-buffer a few seconds' worth on their end anyway (see
+// RELAY_TARGET_LEAD_SECONDS client-side), so trading a bit more baseline
+// latency here for steadier delivery is worth it.
+const SOCKET_CHUNK_FLUSH_MS = 1000;
 
 type ChunkListener = (chunk: Buffer) => void;
 
