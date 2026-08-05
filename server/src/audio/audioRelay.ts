@@ -150,6 +150,18 @@ function startRelay(code: string): RoomRelay {
       relay.pendingInitBytes = Buffer.alloc(0);
       fragmentBytes = split.rest;
       console.log(`[audio-relay:${code}] captured ${relay.initSegment.length}-byte init segment`);
+
+      // Anyone who subscribed before we knew where the init segment ended
+      // (the very first listener(s) of a brand new relay, or anyone who
+      // subscribed in the brief window while we were still scanning for it)
+      // never got it - subscribe()/onChunk() below only replay it to
+      // subscribers who join *after* this point. Without it, their
+      // SourceBuffer only ever gets fragments with no codec header to
+      // interpret them against, so nothing decodes and they hear silence.
+      relay.subscribers.forEach((res) => {
+        if (!res.writableEnded) res.write(relay.initSegment!);
+      });
+      relay.chunkListeners.forEach((listener) => listener(relay.initSegment!));
     }
 
     relay.subscribers.forEach((res) => {
