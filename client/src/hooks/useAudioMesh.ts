@@ -167,10 +167,24 @@ async function logSelectedCandidatePair(pc: RTCPeerConnection, label: string) {
   }
 }
 
+/** The codec string the server's ffmpeg relay actually produces (see audioRelay.ts). */
+const RELAY_MIME_TYPE = 'audio/mp4; codecs="mp4a.40.2"';
+
 /**
- * Plays a continuous stream of independently-decodable MP3 chunks (produced
- * by the server's ffmpeg relay) via the Web Audio API, scheduling each
- * decoded buffer back-to-back for gapless playback.
+ * How much buffered-ahead audio to wait for before starting playback. This
+ * is purely a smoother-start nicety, not a correctness requirement: once
+ * playing, MediaSource handles a slow/late fragment by pausing and
+ * resuming on its own (the "waiting"/native buffering behavior every video
+ * site relies on) with no click or glitch, unlike decoding independent
+ * chunks by hand. A bit of lead just avoids an near-immediate stall right
+ * out of the gate on a slow network.
+ */
+const RELAY_STARTUP_BUFFER_SECONDS = 1;
+
+/**
+ * Plays the continuous fragmented-MP4/AAC stream produced by the server's
+ * ffmpeg relay through MediaSource Extensions, appending each delivered
+ * chunk to a SourceBuffer as it arrives.
  *
  * This exists for listeners whose network blocks long-lived streaming HTTP
  * connections outright (some proxies/firewalls specifically flag and kill
@@ -178,88 +192,95 @@ async function logSelectedCandidatePair(pc: RTCPeerConnection, label: string) {
  * traffic through). Chunks arrive as binary Socket.IO events over the
  * already-connected, already-proven WebSocket instead of a separate HTTP
  * stream, so it stays viable anywhere the rest of the app already works.
+ *
+ * MSE (rather than decoding each delivered chunk independently via
+ * decodeAudioData, as an earlier version did) is specifically what makes
+ * this gapless: independently decoding arbitrary byte-range fragments loses
+ * or mis-syncs the partial frame at each chunk boundary, which is exactly
+ * what caused periodic "cutting"/glitchy-overlap artifacts once per chunk.
+ * MSE keeps one continuous decode timeline across every appended fragment,
+ * so there's no per-chunk boundary to glitch at - the browser's own
+ * streaming-media pipeline (the same one every video site relies on) does
+ * the gapless stitching for us.
  */
-/**
- * How much decoded audio to keep queued up ahead of the playback head
- * before trusting the pipeline enough to actually start/resume sound.
- * Chunks arrive roughly once per server flush interval - if delivery of the
- * next one is ever late by less than this, playback just eats into the
- * cushion instead of an audible gap. Bigger number = more resistant to
- * stuttering, at the cost of that much more delay versus the host's real
- * audio - a trade explicitly worth making for passive group listening.
- */
-const RELAY_TARGET_LEAD_SECONDS = 1.5;
-
 class LiveAudioPlayer {
-  private ctx: AudioContext;
-  private nextStartTime = 0;
-  private chain: Promise<void> = Promise.resolve();
-  // While priming, decoded chunks are held here (not yet scheduled) until
-  // enough is queued up to survive normal jitter without running dry.
-  private isPriming = true;
-  private primeBuffer: AudioBuffer[] = [];
+  private audio: HTMLAudioElement;
+  private mediaSource: MediaSource;
+  private sourceBuffer: SourceBuffer | null = null;
+  private queue: ArrayBuffer[] = [];
+  private startedPlayback = false;
+  private mseUnsupported = false;
 
   constructor() {
-    const AudioContextCtor =
-      window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    this.ctx = new AudioContextCtor();
-  }
+    this.audio = document.createElement("audio");
+    this.audio.style.display = "none";
+    document.body.appendChild(this.audio);
 
-  get needsResume(): boolean {
-    return this.ctx.state === "suspended";
-  }
-
-  resume(): Promise<void> {
-    return this.ctx.resume();
-  }
-
-  pushChunk(chunk: ArrayBuffer) {
-    this.chain = this.chain.then(() => this.decodeAndSchedule(chunk));
-  }
-
-  private async decodeAndSchedule(chunk: ArrayBuffer) {
-    let buffer: AudioBuffer;
-    try {
-      buffer = await this.ctx.decodeAudioData(chunk);
-    } catch {
-      return; // an occasional non-frame-aligned fragment - safe to drop
-    }
-
-    // Ran dry (first chunk ever, or the buffer we built up got fully consumed
-    // by a network stall bigger than our cushion) - rebuild a real lead
-    // before playing anything else, rather than resuming with almost no
-    // margin and setting up the very next chunk to stutter again too.
-    if (this.nextStartTime === 0 || this.nextStartTime < this.ctx.currentTime) {
-      this.isPriming = true;
-      this.nextStartTime = 0;
-      this.primeBuffer = [];
-    }
-
-    if (this.isPriming) {
-      this.primeBuffer.push(buffer);
-      const queued = this.primeBuffer.reduce((sum, b) => sum + b.duration, 0);
-      if (queued < RELAY_TARGET_LEAD_SECONDS) return; // keep priming
-
-      this.isPriming = false;
-      this.nextStartTime = this.ctx.currentTime + 0.1;
-      for (const primed of this.primeBuffer) this.scheduleBuffer(primed);
-      this.primeBuffer = [];
+    if (!MediaSource.isTypeSupported(RELAY_MIME_TYPE)) {
+      console.error(`[audio] MediaSource doesn't support ${RELAY_MIME_TYPE} in this browser`);
+      this.mseUnsupported = true;
+      this.mediaSource = new MediaSource(); // placeholder; never opened
       return;
     }
 
-    this.scheduleBuffer(buffer);
+    this.mediaSource = new MediaSource();
+    this.audio.src = URL.createObjectURL(this.mediaSource);
+    this.mediaSource.addEventListener("sourceopen", () => {
+      try {
+        this.sourceBuffer = this.mediaSource.addSourceBuffer(RELAY_MIME_TYPE);
+        this.sourceBuffer.addEventListener("updateend", () => {
+          this.maybeStartPlayback();
+          this.pump();
+        });
+        this.pump();
+      } catch (err) {
+        console.error("[audio] MSE addSourceBuffer failed:", err);
+      }
+    });
   }
 
-  private scheduleBuffer(buffer: AudioBuffer) {
-    const source = this.ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(this.ctx.destination);
-    source.start(this.nextStartTime);
-    this.nextStartTime += buffer.duration;
+  get needsResume(): boolean {
+    return this.audio.paused && this.startedPlayback;
+  }
+
+  resume(): Promise<void> {
+    return this.audio.play();
+  }
+
+  pushChunk(chunk: ArrayBuffer) {
+    if (this.mseUnsupported) return;
+    this.queue.push(chunk);
+    this.pump();
+  }
+
+  private pump() {
+    if (!this.sourceBuffer || this.sourceBuffer.updating) return;
+    const next = this.queue.shift();
+    if (!next) return;
+    try {
+      this.sourceBuffer.appendBuffer(next);
+    } catch (err) {
+      console.error("[audio] MSE appendBuffer failed:", err);
+    }
+  }
+
+  private maybeStartPlayback() {
+    if (this.startedPlayback || !this.sourceBuffer) return;
+    const buffered = this.sourceBuffer.buffered;
+    if (buffered.length === 0) return;
+    const bufferedAhead = buffered.end(buffered.length - 1) - this.audio.currentTime;
+    if (bufferedAhead < RELAY_STARTUP_BUFFER_SECONDS) return;
+    this.startedPlayback = true;
+    this.audio.play().catch(() => {
+      // Autoplay may be blocked until a user gesture - resumeFallbackAudio()
+      // (triggered from a click in the UI) retries this.
+    });
   }
 
   close() {
-    this.ctx.close().catch(() => {});
+    this.audio.pause();
+    this.audio.removeAttribute("src");
+    this.audio.remove();
   }
 }
 

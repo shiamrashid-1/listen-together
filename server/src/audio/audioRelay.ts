@@ -3,16 +3,11 @@ import type { ServerResponse } from "node:http";
 import ffmpegPath from "ffmpeg-static";
 
 const PENDING_SUBSCRIBER_TIMEOUT_MS = 15000;
-// How often buffered MP3 output gets flushed to socket-based subscribers, as
-// one combined chunk. Bigger than the HTTP path's immediate per-byte
-// forwarding on purpose: MP3 frames are independently decodable, but only if
-// a chunk contains enough of them - very small/oddly-cut chunks decode
-// inconsistently via the Web Audio API on the listener side. Larger, less
-// frequent chunks are also more resistant to Socket.IO delivery jitter -
-// listeners pre-buffer a few seconds' worth on their end anyway (see
-// RELAY_TARGET_LEAD_SECONDS client-side), so trading a bit more baseline
-// latency here for steadier delivery is worth it.
-const SOCKET_CHUNK_FLUSH_MS = 1000;
+// How often buffered fragment output gets flushed to socket-based
+// subscribers, as one combined chunk. This no longer needs to be large for
+// decode-stability reasons (see extractInitSegment/MediaSource below) - it's
+// just batching to keep the number of Socket.IO messages reasonable.
+const SOCKET_CHUNK_FLUSH_MS = 300;
 
 type ChunkListener = (chunk: Buffer) => void;
 
@@ -22,6 +17,14 @@ interface RoomRelay {
   chunkListeners: Set<ChunkListener>;
   socketBuffer: Buffer[];
   socketFlushTimer: NodeJS.Timeout;
+  /**
+   * The cached ftyp+moov header every subscriber needs before any fragment
+   * makes sense to a MediaSource SourceBuffer - see extractInitSegment.
+   * null until the first bytes of ffmpeg's output have been classified.
+   */
+  initSegment: Buffer | null;
+  /** Accumulates early output until extractInitSegment finds the boundary. */
+  pendingInitBytes: Buffer;
 }
 
 const relays = new Map<string, RoomRelay>();
@@ -45,16 +48,52 @@ function attachPendingSubscribers(code: string, relay: RoomRelay) {
 }
 
 /**
+ * A fragmented-MP4 stream starts with an initialization segment (ftyp+moov
+ * boxes describing the codec/track, empty of actual samples) followed by a
+ * continuous run of moof+mdat fragments carrying the encoded audio. A
+ * MediaSource SourceBuffer needs that init segment exactly once before it
+ * can make sense of *any* fragment - so a listener who subscribes after the
+ * relay has already been running for a while (and therefore missed the very
+ * first bytes ffmpeg ever wrote) needs it replayed to them specifically, not
+ * just whatever fragment happens to be flowing by when they join.
+ *
+ * This scans a growing byte buffer for the start of the first "moof" box,
+ * splitting everything before it off as that cacheable init segment. Returns
+ * null if the boundary hasn't shown up yet (caller should accumulate more
+ * data and try again).
+ */
+function extractInitSegment(buffered: Buffer): { initSegment: Buffer; rest: Buffer } | null {
+  let offset = 0;
+  while (offset + 8 <= buffered.length) {
+    const size = buffered.readUInt32BE(offset);
+    const type = buffered.toString("ascii", offset + 4, offset + 8);
+    if (size < 8) return null; // malformed or 64-bit extended-size box - bail and wait for more data
+    if (type === "moof") {
+      return { initSegment: buffered.subarray(0, offset), rest: buffered.subarray(offset) };
+    }
+    if (offset + size > buffered.length) return null; // this box isn't fully buffered yet
+    offset += size;
+  }
+  return null;
+}
+
+/**
  * Spawns a per-room ffmpeg process that transcodes the host's live webm/opus
- * chunks (fed via stdin) into a continuous MP3 stream (stdout), fanned out
- * two ways: as a plain HTTP byte stream (for <audio src>, which needs a
- * format any browser can play natively, including Safari/iOS which don't
- * support WebM at all), and as periodic binary chunks pushed over each
- * listener's existing Socket.IO connection (for networks that block
- * long-lived streaming HTTP connections outright but already allow that
- * WebSocket traffic through, since the rest of the app depends on it too).
- * MP3 is chosen for both because it's self-synchronizing - a decoder can
- * pick up mid-stream without a cached header, unlike webm's init segment.
+ * chunks (fed via stdin) into a continuous fragmented-MP4/AAC stream
+ * (stdout), fanned out two ways: as a plain HTTP byte stream, and as
+ * periodic binary chunks pushed over each listener's existing Socket.IO
+ * connection (for networks that block long-lived streaming HTTP connections
+ * outright but already allow that WebSocket traffic through, since the rest
+ * of the app depends on it too).
+ *
+ * Fragmented MP4 (rather than a plain MP3 stream chopped into arbitrary
+ * byte-range pieces) is specifically so listener playback can go through
+ * MediaSource Extensions instead of decoding each delivered chunk
+ * independently: independently decoding arbitrary MP3 byte ranges drops or
+ * mis-syncs the partial frame at each chunk boundary, which is exactly what
+ * caused the periodic "cutting"/glitchy-overlap artifacts - MSE keeps one
+ * continuous decode timeline across every appended fragment, so there's no
+ * per-chunk boundary to glitch at all.
  */
 function startRelay(code: string): RoomRelay {
   const ffmpeg = spawn(ffmpegPath as unknown as string, [
@@ -64,7 +103,7 @@ function startRelay(code: string): RoomRelay {
     "pipe:0",
     "-vn",
     "-acodec",
-    "libmp3lame",
+    "aac",
     "-b:a",
     "128k",
     "-ar",
@@ -72,7 +111,11 @@ function startRelay(code: string): RoomRelay {
     "-ac",
     "2",
     "-f",
-    "mp3",
+    "mp4",
+    "-movflags",
+    "frag_keyframe+empty_moov+default_base_moof",
+    "-frag_duration",
+    "500000",
     "pipe:1",
   ]);
 
@@ -82,6 +125,8 @@ function startRelay(code: string): RoomRelay {
     chunkListeners: new Set(),
     socketBuffer: [],
     socketFlushTimer: setInterval(() => flushSocketBuffer(code, relay), SOCKET_CHUNK_FLUSH_MS),
+    initSegment: null,
+    pendingInitBytes: Buffer.alloc(0),
   };
   relays.set(code, relay);
   attachPendingSubscribers(code, relay);
@@ -93,10 +138,22 @@ function startRelay(code: string): RoomRelay {
       loggedFirstOutput = true;
       console.log(`[audio-relay:${code}] ffmpeg producing output (${relay.subscribers.size} HTTP subscriber(s))`);
     }
+
+    let fragmentBytes = chunk;
+    if (!relay.initSegment) {
+      relay.pendingInitBytes = Buffer.concat([relay.pendingInitBytes, chunk]);
+      const split = extractInitSegment(relay.pendingInitBytes);
+      if (!split) return; // still accumulating the init segment - nothing to forward yet
+      relay.initSegment = split.initSegment;
+      relay.pendingInitBytes = Buffer.alloc(0);
+      fragmentBytes = split.rest;
+      console.log(`[audio-relay:${code}] captured ${relay.initSegment.length}-byte init segment`);
+    }
+
     relay.subscribers.forEach((res) => {
-      if (!res.writableEnded) res.write(chunk);
+      if (!res.writableEnded) res.write(fragmentBytes);
     });
-    relay.socketBuffer.push(chunk);
+    relay.socketBuffer.push(fragmentBytes);
   });
 
   ffmpeg.stderr.on("data", (chunk: Buffer) => {
@@ -172,6 +229,7 @@ export function subscribe(code: string, res: ServerResponse) {
   const relay = relays.get(upperCode);
 
   if (relay) {
+    if (relay.initSegment) res.write(relay.initSegment);
     relay.subscribers.add(res);
     console.log(`[audio-relay:${upperCode}] HTTP subscriber attached (${relay.subscribers.size} total)`);
     res.on("close", () => relay.subscribers.delete(res));
@@ -200,17 +258,21 @@ export function subscribe(code: string, res: ServerResponse) {
 }
 
 /**
- * Registers a callback that gets invoked with combined MP3 chunks roughly
- * every SOCKET_CHUNK_FLUSH_MS, for delivery over a listener's own
- * Socket.IO connection instead of a separate HTTP stream. Returns an
- * unsubscribe function. If the relay doesn't exist yet, queues the listener
- * so it attaches as soon as the host's first chunk starts one.
+ * Registers a callback that gets invoked with combined fragment chunks
+ * roughly every SOCKET_CHUNK_FLUSH_MS, for delivery over a listener's own
+ * Socket.IO connection instead of a separate HTTP stream. If the relay
+ * already has a cached init segment (i.e. it's been running a while), that's
+ * delivered to this listener immediately so a MediaSource SourceBuffer on
+ * their end has what it needs before any fragment arrives. Returns an
+ * unsubscribe function. If the relay doesn't exist yet at all, queues the
+ * listener so it attaches as soon as the host's first chunk starts one.
  */
 export function onChunk(code: string, listener: ChunkListener): () => void {
   const upperCode = code.toUpperCase();
   const relay = relays.get(upperCode);
 
   if (relay) {
+    if (relay.initSegment) listener(relay.initSegment);
     relay.chunkListeners.add(listener);
     return () => relay.chunkListeners.delete(listener);
   }
